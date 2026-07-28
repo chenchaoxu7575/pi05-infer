@@ -158,6 +158,84 @@ idle,而今天的 off 臂是 1390.0 / 142.2 —— 但两者 GPU busy **完全�
 
 ---
 
+## 2b. 2026-07-28 · 去掉死的 timestep conditioning
+
+`get_suffix_out` 每步都算 `cond = time_mlp(sinusoidal(timestep))`,但 adaRMS 调制预算表
+上线之后 `adarms_mod` 恒有值,`modeling_gemma` 的 `elif adarms_cond is not None` 分支再也
+没进过 —— 算出来的 `adarms_cond` 直接被丢弃。改动加了一个 `skip_adarms_cond` 开关
+(默认沿用旧行为;`get_suffix_out` 只在自己确实拿着 `adarms_mod` 时才传),**保留** fallback
+分支。kill switch:`RLINF_SKIP_DEAD_ADARMS_COND=0` 恢复旧行为。
+
+两臂**同一份代码、同一 session**,只翻这个环境变量。
+
+**位级一致**,固定 seed,`[1,50,6]` 在 float64 下比较,两种 compile mode 各一组
+(`max-autotune` 与 `--stage1` 的 `max-autotune-no-cudagraphs`),再加 RLinf 参考臂,
+共 5 份 dump 两两对拍(10 对):
+
+| check | result |
+|---|---|
+| skip1 vs skip0,`--stage1` | **bitwise equal,`max\|Δ\| = 0.00e+00`**,0/300 元素不同 |
+| skip1 vs skip0,`max-autotune` | **bitwise equal,`max\|Δ\| = 0.00e+00`**,0/300 |
+| skip1 vs RLinf 参考路径 | **bitwise equal,`max\|Δ\| = 0.00e+00`**,0/300 |
+| 其余 7 对 | 全部 bitwise equal,`0.00e+00` |
+
+**Kernel**,nsys 2026.1.2,`--gpu-metrics-devices=cuda-visible --cuda-graph-trace=node`,
+12 predicts,两臂前后脚拍于同一 session,stream 157(Stage-1 捕获图):
+
+| 类别 | skip0 n/step | skip1 n/step | Δn | Δµs/step |
+|---|--:|--:|--:|--:|
+| `internal::gemvx::kernel`(两个 time-MLP `Linear`) | 2 | **0** | −2 | **−18.38** |
+| `vectorized_elementwise`(`cos`/`sin`/`silu`/fp64 正弦嵌入) | 28 | 18 | −10 | −14.57 |
+| `elementwise_kernel` | 10 | 8 | −2 | −8.28 |
+| `cublasLt::splitKreduce` | 4 | 2 | −2 | −2.19 |
+| `cublasLt::epilogue::globalKernel` | 2 | **0** | −2 | −2.07 |
+| `unrolled_elementwise` + 其余两类零碎 | 9 | 6 | −3 | −3.10 |
+| **stream 157 全量** | **238.00** | **217.00** | **−21** | **−47.3** |
+
+**没有任何 GEMM / attention / Triton kernel 的数量或时间改变**
+(`triton_tem_fused_mm` 18、`_swiglu_mm_kernel` 18、`_qkv_rope_kernel` 18、
+`triton_tem_fused_bmm` 36 全部不变,时间差 < 0.8 µs/step);prefix(stream 7)
+673 kernels/predict 两臂完全一致。
+
+**每 step GPU idle / wall**(`tools/step_idle.py`,同上两份 profile):
+
+| arm | step wall | GPU busy | idle | idle % |
+|---|--:|--:|--:|--:|
+| skip0(旧行为) | 1294.0 µs | 1233.3 | 60.7 | 4.69 % |
+| skip1(新,默认) | **1242.7 µs** | 1186.2 | **56.5** | **4.54 %** |
+
+−51.3 µs/step × 10 = **−0.51 ms/predict**(时间线口径)。
+
+**Stage-1 仍然正常捕获**(两臂都是):`denoise/expert_forward` NVTX = **0/predict**、
+distinct `graphId` = **1**(skip0 28560 kern,skip1 26040 kern)、
+bench 的 `_denoise_graph_captured` 断言通过。
+
+**e2e 配对 A/B**,4 轮交替,每轮 30 iterations after 8 warmup,串行:
+
+| round | skip0(旧) | skip1(新) | Δ | SM clock 旧/新 |
+|---|--:|--:|--:|---|
+| 1 | 43.20 ms | **42.90 ms** | −0.30 | 2416 / 2423 MHz |
+| 2 | 43.25 | **42.91** | −0.33 | 2425 / 2420 |
+| 3 | 43.26 | **42.90** | −0.37 | 2430 / 2417 |
+| 4 | 43.07 | **42.88** | −0.20 | 2412 / 2416 |
+| **grand mean** | **43.20 ms** | **42.90 ms** | **−0.30 ms**(sd 0.07,n=4) | |
+
+4/4 轮同号,散布 −0.20…−0.37。e2e 的 −0.30 ms 小于时间线的 −0.51 ms,差额落在 prefix 的
+run-to-run 漂移(28.00 → 28.13 ms/predict),不是这项改动造成的。
+
+⚠️ **坑,值得单独记一笔:配对 A/B 的两臂必须先验证它们确实不同。** 第一轮测量给出
+Δ = −0.02 ms(sd 0.04),看上去像"收益淹没在噪声里"。真实原因是同步到远端机器的 patch 是
+**加 kill switch 之前**的版本,两臂跑的是同一个 build —— 那次其实是一次**空对照**。
+是 nsys 分别数两臂的 kernels/step(都是 217,而不是 238 vs 217)把它抓出来的。
+这次事故的副产品很有用:它把本机**配对 A/B 的噪声地板**钉在 **Δ = −0.02 ms、sd 0.04**,
+正是有了这个地板,才能说 −0.30 ms(≈ 15× 地板)是可测的收益而不是噪声。
+
+Artifacts:`claude_mem/pi05_rollout_forward/20260728_adarms_cond/`
+(`prof_skip0/1.nsys-rep` + sqlite、`ab/` 下 8 份 clocks json + log、`ab_summary.txt`、
+`step_idle.txt`、`v2_driver.log`)。
+
+---
+
 ## 3. 2026-07-27 · 与 `dexmal/realtime-vla` 的正面对比
 
 完整文档:`claude_mem/pi05_rollout_forward/HEADTOHEAD_realtime_vla_pro5k.md`。
@@ -183,8 +261,8 @@ pickle,我们只有 HF safetensors)。这一项的影响被单独测掉了:N(0,0
 后续的 kernel fusion 把 expert block 拉到 163 kernels/step(对方 165),两个融合块的
 执行时间反超:SwiGLU 312 µs vs 他们 380,QKV+RoPE 132 µs vs 他们 144。
 
-⚠️ **43.41 ms 与本仓库当前的 43.16 ms 不是配对测量** —— 相隔一天、不同 session、
-不同 build。两者的差(0.25 ms)小于本机记录在案的 ±0.7 ms rebuild variance,所以
+⚠️ **43.41 ms 与本仓库当前的 42.90 ms 不是配对测量** —— 相隔一天、不同 session、
+不同 build。两者的差(0.51 ms)小于本机记录在案的 ±0.7 ms rebuild variance,所以
 **不能**据此宣称超越。唯一做过配对的正面对比就是上表的 43.41 vs 44.55。
 
 ⚠️ 另注:早期笔记把 `dexmal/realtime-vla` 和 `limxdynamics/FluxVLA` 混为一谈。

@@ -3,14 +3,14 @@
 **π0.5 动作专家(action expert)的独立 bs=1 推理引擎**,从 [RLinf](https://github.com/RLinf/RLinf)
 里抽出来,针对 **RTX PRO 5000(GB202 / sm_120,Blackwell)** 做过一轮系统性优化。
 
-端到端 `predict_action_batch`:**52.60 ms → 43.16 ms(−9.44 ms,−17.9 %)**。
+端到端 `predict_action_batch`:**52.60 ms → 42.90 ms(−9.70 ms,−18.4 %)**。
 
 **每一项优化都是位级一致的**(bit-exact,`max|Δ| = 0.00e+00`,固定 seed 与未优化路径对拍)。
 没有量化、没有降精度、没有改采样器、没有减少去噪步数 —— 模型输出逐比特不变。
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/ledger_dark.png">
-  <img alt="优化台账:52.60 ms 到 43.16 ms 的瀑布图" src="docs/ledger_light.png">
+  <img alt="优化台账:52.60 ms 到 42.90 ms 的瀑布图" src="docs/ledger_light.png">
 </picture>
 
 ---
@@ -33,11 +33,11 @@ checkpoint `RLinf-Pi05-LIBERO-SFT`,torch 2.7.1+cu128,nsys 2026.1.2。
 
 | | 这一段做什么 | 主要手段 | 兑现 |
 |---|---|---|--:|
-| **① 消除** | 让 GPU 别空转,也别做本来就不该做的事 | adaRMS 调制预算表、Stage-1 denoise CUDA 图、static KV buffer、att_masks 上设备 | **−5.69 ms** |
+| **① 消除** | 让 GPU 别空转,也别做本来就不该做的事 | adaRMS 调制预算表、Stage-1 denoise CUDA 图、static KV buffer、att_masks 上设备、去掉死的 timestep conditioning | **−5.99 ms** |
 | **② 融合** | 该做的事,用更少的 kernel 做完 | fused QKV 权重、SwiGLU 与 QKV+RoPE 两个 epilogue 融合 | **−3.17 ms** |
 | **③ 压 kernel** | 剩下的 kernel,让每一个自己跑得更快 | split-K、tile 扫参 | **0 ms —— 才刚开始** |
 
-(前两段相加 −8.86 ms;余下的 −0.58 ms 是剥离成独立包并接上 `--stage1` 那一步,见台账第 7 行。)
+(前两段相加 −9.16 ms;余下的 −0.58 ms 是剥离成独立包并接上 `--stage1` 那一步,见台账第 7 行。)
 
 顺序不是随手排的:**"消除"优于"融合"优于"调优"**。前两段的三个主力项(预算表、
 合并 GEMM、消拷贝)没有一行手写 Triton;而第三段每 0.1 ms 都要付出一个手写 kernel 的代价。
@@ -58,8 +58,9 @@ e2e = `predict_action_batch`,plain wall clock(**不是** nsys 的 wall time),
 | 4 | ＋ static KV buffer | ① | 45.10 | −0.51 | ✅ |
 | 5 | ＋ att_masks 上设备(去 host 同步) | ① | 44.79 | −0.31 | ✅ |
 | 6 | ＋ SwiGLU / QKV+RoPE 两个 epilogue 融合 | ② | 43.74 | **−1.05** † | ✅ |
-| 7 | 独立包 ＋ `--stage1`(当前) | — | **43.16** | −0.58 ‡ | ✅ |
-| | **总计** | | | **−9.44 ms(−17.9 %)** | |
+| 7 | 独立包 ＋ `--stage1` | — | 43.16 | −0.58 ‡ | ✅ |
+| 8 | ＋ 去掉死的 timestep conditioning(当前) | ① | **42.90** | **−0.30** ★ | ✅ |
+| | **总计** | | | **−9.70 ms(−18.4 %)** | |
 
 † 这一行有两个都正确、口径不同的数字,一并列出:在这条**累积链**上它是 **−1.05 ms**
 (44.79 → 43.74);而在**它自己那次 4 轮配对 A/B** 里,基线是同 session 的 44.87 ms,
@@ -70,15 +71,23 @@ e2e = `predict_action_batch`,plain wall clock(**不是** nsys 的 wall time),
 这一行里唯一做过配对的部分是独立包内的 `--stage1`:同一 session 4 轮交替,
 **44.08 → 43.16 ms,Δ = −0.93 ms**(sd 0.36,n = 4),每轮两臂 SM 时钟相差 20 MHz 以内。
 
+★ 第 8 行是同一 session、同一份代码、只翻 `RLINF_SKIP_DEAD_ADARMS_COND` 的 4 轮交替配对:
+**43.20 → 42.90 ms,Δ = −0.30 ms**(sd 0.07,n = 4,4/4 轮同号,散布 −0.20…−0.37)。
+关掉那一臂测到 43.20,与第 7 行跨 session 的 43.16 相差 0.04 ms,两条链因此对得上。
+这一轮还顺手量到了本机**配对 A/B 的噪声地板**:先前误把两臂配成同一个 build 跑了一次
+(见 §1.5 的坑),得到 Δ = −0.02 ms、sd 0.04 —— 所以 −0.30 ms 是噪声地板的 ~15 倍,
+是可测的,不是把噪声讲成收益。
+
 内核层面的配套数字:
 
 | 指标 | before | after | 归属 |
 |---|--:|--:|:--:|
-| 每 step GPU idle | 142.2 µs(10.2 %) | **60.5 µs(4.7 %)** | ① |
+| 每 step GPU idle | 142.2 µs(10.2 %) | **56.5 µs(4.5 %)** | ① |
 | adaRMS 投影 `triton_per_fused_addmm_0` | 300 instances,395 µs/step,DRAM-read 87 % | **0 instances** | ① |
 | prefix KV 的 `cat` kernel | 88 µs/step(物理下限 27) | **0** | ① |
-| denoise kernels/step | 305 | **238**(−22 %) | ② |
-| denoise µs/step | 1368.0 | **1236.0**(−9.6 %) | ② |
+| timestep conditioning(正弦 + time MLP) | 21 kernel/step,47.3 µs/step | **0** | ① |
+| denoise kernels/step | 305 | **217**(−29 %) | ①② |
+| denoise µs/step | 1368.0 | **1185.0**(−13.4 %) | ①② |
 | k/v_proj 的 launch grid | **8**(110 个 SM 里只有 8 个在忙) | 80(融合后的 QKV GEMM) | ② |
 | `_swiglu_mm_kernel` 达成带宽 | — | **967 GB/s** | ② |
 | `down_proj` 达成带宽 | 557 GB/s | **557 GB/s(未动)** | ③ |
@@ -137,6 +146,7 @@ eager 的 `x_t_mean + noise * 0`;而 `sample_noise` 的抽样留在图之外,全
 > kernel 也全都带 `graphNodeId`(inductor 自己就发了一个 cudagraph),我据此误判过一次。
 > 可靠信号:`denoise/expert_forward` 的 NVTX range 数(10/predict = eager,**0 = 在图内**)、
 > distinct `graphId` 数(2 → 1)、stream 157 上的 kernels/step(171 → 238)。
+> (238 是当时的数;§1.5 之后是 217,判据本身不变。)
 
 ### 1.3 static KV buffer(−0.51 ms)
 
@@ -165,6 +175,52 @@ token —— 是一个 full-attention block,两处 append 都是 `[0]*n`),长度
 CUDA 图捕获的语句 —— 改之前 `torch.cuda.CUDAGraph()` 捕获 `_build_prefix_cache` 会在这一行抛
 `operation not permitted when stream is capturing`,改之后 capture / replay 都成功。
 prefix 是 GPU busy 的 **71.7 %**,所以这条的长期价值远大于它自己的 0.31 ms。
+
+### 1.5 去掉死的 timestep conditioning(−0.30 ms)
+
+**为什么。** §1.1 的预算表落地之后留下了一段**没人删的死代码**。`get_suffix_out` 每步仍然调
+`embed_suffix` 算 `cond = time_mlp(sinusoidal(timestep))` —— 一个 fp64 的正弦嵌入加两个
+`Linear(1024→1024)` 加两次 silu。但下游 `modeling_gemma.py` 里是这样挑的:
+
+```python
+if adarms_mod is not None:        # 我们永远传(就是那张预算表)
+    adarms_mod_all = adarms_mod
+elif adarms_cond is not None and self.adarms_Wstacked is not None:   # 永远进不来
+    adarms_mod_all = F.linear(adarms_cond, self.adarms_Wstacked, ...)
+```
+
+预算表上线那天起 `adarms_mod` 就一直有值,`elif` 再也没执行过,`adarms_cond` 算完直接被丢掉。
+π0.5 上它也确实没有别的去处 —— `action_time_emb` 就是 `action_emb` 本身,时间嵌入不进 token。
+
+**怎么做。** 加一个 `skip_adarms_cond` 开关,**不删那条 `elif`**:它是 fallback,而且非 π0.5
+路径要把时间嵌入 concat 进 action token,那里仍然必须算。`get_suffix_out` 只在自己确实拿着
+`adarms_mod` 时才传这个开关,默认值保持今天的行为。开关是**编译期的 Python 常量**,不是对
+device tensor 的判断,所以 `embed_suffix` 仍然可以待在 Stage-1 捕获的图里(图只会 trace 到
+其中一条分支)。`GemmaRMSNorm` 的 guard 同步放宽:拿着 `mod` 的调用方现在可以合法地传
+`cond=None`。
+
+**量了多少。**
+
+| | before | after |
+|---|--:|--:|
+| denoise kernels/step | 238 | **217**(−21) |
+| denoise GPU busy | 1232.3 µs/step | **1185.0**(−47.3) |
+| step wall(nsys 时间线) | 1294.0 µs | **1242.7**(−51.3 → −0.51 ms/predict) |
+| e2e(4 轮配对) | 43.20 ms | **42.90**(**−0.30 ms**,sd 0.07) |
+
+消掉的 21 个核正好是那两段计算:`internal::gemvx` ×2(两个 time-MLP,18.4 µs/step)
+＋ 它们的 `cublasLt` splitK/epilogue 辅助核 ×4(4.3 µs)＋ `cos`/`sin`/`silu` 与 fp64 正弦
+嵌入的一堆 elementwise ×15(24.6 µs)。**没有任何 GEMM / attention / Triton 核的数量或时间
+发生变化**,prefix(stream 7)的 673 kernels/predict 也一个没动。
+
+e2e 的 −0.30 ms 小于时间线上的 −0.51 ms:差额落在 prefix 的 run-to-run 漂移里
+(28.00 → 28.13 ms/predict),不是这项改动造成的。
+
+> **坑:配对 A/B 的两臂必须验证它们真的不一样。** 第一轮测量得到 Δ = −0.02 ms(sd 0.04),
+> 看着像"收益在噪声里"。实际是打到远端机器上的 patch 是**加 kill switch 之前**的版本,
+> 两臂跑的是同一个 build —— 那次测量其实是一次**空对照**。用 nsys 分别数两臂的
+> kernels/step(238 vs 217)才把它抓出来。空对照本身是有价值的副产品:它把本机配对 A/B 的
+> 噪声地板钉在了 **±0.04 ms**,正是靠它才能说 −0.30 ms 是真的。
 
 ---
 
@@ -298,7 +354,7 @@ PaliGemma 的 prefix LM 也是 Gemma。一个为 M=50 手调的 tile config 对 
 ## ③ 优化 kernel 本身 —— **进行中,目前兑现 0 ms**
 
 前两段把"不该做的事"和"多余的 launch"清完之后,剩下的时间**全在 kernel 自己的执行**里。
-这一段才刚开始,**上面那个 43.16 ms 里没有它的任何贡献**。下面写的是靶子和证据,不是成果。
+这一段才刚开始,**上面那个 42.90 ms 里没有它的任何贡献**。下面写的是靶子和证据,不是成果。
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/denoise_dark.png">
@@ -334,13 +390,17 @@ config 是手钉的、从没 autotune 过 —— 因为 custom op 对 inductor �
 
 **量级 ~0.8 ms。状态:需要一次正经的配对(交替、≥4 轮)扫描。**
 
-### 3.3 顺带:还有一项"消除"没做完(~1.0 ms)
+### 3.3 顺带:那项"消除"做了一半(~0.5 ms 还在)
 
-图里那根橙色的 **eager per-step glue(99.7 µs/step,~70 kernel/step)**,严格说属于第 ① 段
-而不是第 ③ 段,但它现在是**剩下最大的单项**:`embed_suffix`、正弦时间嵌入、position id 的
-`cumsum`/`DeviceScan`、Euler 更新、log-prob。其中**时间嵌入、position id、rotary 表的
-`cos`/`sin` 在 10 个 Euler 步上完全相同** —— 和已经外提的 adaRMS 表是同一类问题,
-同一套解法。**量级 ~1.0 ms。状态:未做。**
+图里那根橙色的 **eager per-step glue**,严格说属于第 ① 段而不是第 ③ 段。
+它原本是 99.7 µs/step、~70 kernel/step,其中**纯死代码**的那一半已经由 §1.5 摘掉,
+现在是 **50.6 µs/step、49 kernel/step**。
+
+剩下的那一半不是死代码,是**逐步重复**:position id 的 `cumsum`/`DeviceScan`、
+rotary 表的 `cos`/`sin`、`_get_timesteps` 的 `linspace` —— 这些在 10 个 Euler 步上
+**完全相同**,和已经外提的 adaRMS 表是同一类问题,同一套解法(预计算 + 每步 gather)。
+另外还有真正每步都不同的 Euler 更新与 log-prob,那部分动不了。
+**量级 ~0.5 ms。状态:未做。**
 
 ### 3.4 明确排除的做法
 
@@ -367,7 +427,7 @@ config 是手钉的、从没 autotune 过 —— 因为 custom op 对 inductor �
 
 顺带解释上一张图里的另一个数:expert block 本身现在是 **163 kernels/step**,参考实现是
 165 —— 在 transformer 内部,kernel 数的差距已经抹平,两个融合块的执行时间还反超了。
-剩下的 238 − 163 = 75 个 kernel 全是 expert 之外的 eager per-step glue(§3.3)。
+剩下的 217 − 163 = 54 个 kernel 全是 expert 之外的 eager per-step glue(§3.3)。
 
 图里的数字可以从 profile 重新推导:
 `python docs/make_charts.py --sqlite <stage1_on.sqlite> --sqlite-off <stage1_off.sqlite>`
@@ -390,8 +450,8 @@ config 是手钉的、从没 autotune 过 —— 因为 custom op 对 inductor �
 **当天他们快 1.14 ms(2.6 %)。** 之后 §② 的 kernel fusion 把 expert 拉到 163 kernels/step,
 两个融合块的执行时间反超(SwiGLU 312 µs vs 380,QKV+RoPE 132 µs vs 144)。
 
-⚠️ 本仓库当前的 43.16 ms 与他们的 43.41 ms **不是配对测量** —— 相隔一天、不同 session、
-不同 build,差值(0.25 ms)小于本机记录在案的 ±0.7 ms rebuild variance。**不能**据此
+⚠️ 本仓库当前的 42.90 ms 与他们的 43.41 ms **不是配对测量** —— 相隔一天、不同 session、
+不同 build,差值(0.51 ms)小于本机记录在案的 ±0.7 ms rebuild variance。**不能**据此
 宣称超越。把 realtime-vla 当作同水位的 peer 看待即可。
 
 ⚠️ [`limxdynamics/FluxVLA`](https://github.com/limxdynamics/FluxVLA) 是**另一个**仓库
@@ -466,7 +526,12 @@ python -c "import torch;a=torch.load('/tmp/ref.pt');b=torch.load('/tmp/new.pt');
   算子编出来的 kernel** 对拍(SwiGLU 的输出、QKV+RoPE 的 q / k / v 各自比),这是最严格的
   参照系 —— 被替换掉的正是它。全部 `max|Δ| = 0.00e+00`,零个不同元素。
 * **端到端**用固定 seed 把 `[1, 50, 6]` 的动作在 float64 下和 RLinf 参考路径对拍。
-  `--stage1` on vs off、on vs RLinf、off vs RLinf,三组全是 `0.00e+00`。
+  `--stage1` on vs off、on vs RLinf、off vs RLinf,三组全是 `0.00e+00`;
+  §1.5 之后又补了一组两种 compile mode × 开关 on/off 加参考臂共 5 份 dump 的两两对拍
+  (10 对),同样全部 `0.00e+00`。
+
+§1.5 的消除也带 kill switch:`RLINF_SKIP_DEAD_ADARMS_COND=0` 恢复"每步都算 `adarms_cond`"
+的旧行为(import 时读一次,所以它是编译期常量,不影响 CUDA 图捕获)。
 
 融合核还都带**降级路径**:kill switch(`RLINF_FUSE_SWIGLU=0` / `RLINF_FUSE_QKV_ROPE=0`)、
 triton 不可用、激活不是 tanh-GELU、dtype 不是 bf16/fp16、权重非行主序、shape 除不尽 tile、

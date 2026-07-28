@@ -187,6 +187,8 @@ LEDGER = [
      "kernel_fusion/RESULTS_fusion.md (own paired A/B: 44.87 -> 43.74, -1.14)"),
     ("standalone package + --stage1", 43.16, -0.58,
      "20260728_stage1_pi05infer_pro5k/ab_stage1_summary.txt (paired 44.08 -> 43.16)"),
+    ("+ drop the dead timestep conditioning", 42.90, -0.30,
+     "20260728_adarms_cond/ab_summary.txt (paired 43.20 -> 42.90, sd 0.07, n=4)"),
 ]
 
 # dexmal/realtime-vla @ b86a942, our config, our GPU, same day, real (non-zero)
@@ -238,7 +240,7 @@ def chart_ledger(mode: str) -> None:
     ax.set_xlabel("end-to-end predict_action_batch latency (ms), plain wall clock",
                   fontsize=9.5)
 
-    fig.suptitle("pi0.5 action expert, bs=1: 52.60 -> 43.16 ms  (-9.44 ms, -17.9%)",
+    fig.suptitle("pi0.5 action expert, bs=1: 52.60 -> 42.90 ms  (-9.70 ms, -18.4%)",
                  x=0.012, ha="left", fontsize=14, fontweight="bold", color=t["ink"])
     fig.text(0.012, 0.895,
              "every step bit-exact against the unoptimised path (max|delta| = 0.00e+00); "
@@ -255,31 +257,31 @@ def chart_ledger(mode: str) -> None:
 # --------------------------------------------------------------------------
 # Chart 2 - denoise per-kernel breakdown, current build
 # --------------------------------------------------------------------------
-# Source: 20260728_stage1_pi05infer_pro5k/stage1_on.sqlite, stream 157
+# Source: 20260728_adarms_cond/prof_skip1.sqlite, stream 157
 # (the hand-captured Stage-1 denoise graph), 12 predicts x 10 steps = 120 steps.
-# 238 kernels/step, 1232.6 us/step.
+# 217 kernels/step, 1185.0 us/step.
 #
 # (label, us_per_step, kernels_per_step, group)
 #   group 0 = inductor-generated Triton
 #   group 1 = eager per-step glue (the remaining headroom)
 #   group 2 = our hand-written fused kernels
 DENOISE = [
-    ("SwiGLU: gate/up GEMM + gelu(g)*u  [fused]", 312.53, 18, 2),
-    ("down_proj GEMM", 270.56, 18, 0),
-    ("o_proj GEMM (+ transpose prologue)", 152.24, 18, 0),
-    ("QKV GEMM + RoPE -> static KV  [fused]", 131.85, 18, 2),
-    ("attention BMM  P*V", 110.10, 18, 0),
-    ("eager per-step glue (embed_suffix, Euler, log-prob, position ids)", 99.71, 70, 1),
-    ("attention BMM  Q*K^T", 69.09, 18, 0),
-    ("adaRMS: gated residual + RMSNorm + scale/shift", 57.20, 42, 0),
-    ("masked softmax", 29.30, 18, 0),
+    ("SwiGLU: gate/up GEMM + gelu(g)*u  [fused]", 312.41, 18, 2),
+    ("down_proj GEMM", 271.19, 18, 0),
+    ("o_proj GEMM (+ transpose prologue)", 152.46, 18, 0),
+    ("QKV GEMM + RoPE -> static KV  [fused]", 131.79, 18, 2),
+    ("attention BMM  P*V", 110.40, 18, 0),
+    ("attention BMM  Q*K^T", 69.27, 18, 0),
+    ("adaRMS: gated residual + RMSNorm + scale/shift", 57.29, 42, 0),
+    ("eager per-step glue (embed_suffix, Euler, log-prob, position ids)", 50.63, 49, 1),
+    ("masked softmax", 29.57, 18, 0),
 ]
-DENOISE_TOTAL_US = 1232.58
-DENOISE_TOTAL_KERNELS = 238.0
+DENOISE_TOTAL_US = 1185.01
+DENOISE_TOTAL_KERNELS = 217.0
 
 GROUP_NAMES = {
     0: "inductor Triton (torch.compile max-autotune-no-cudagraphs)",
-    1: "eager per-step glue - the largest item left",
+    1: "eager per-step glue - was 99.7 us / 70 k, half of it was dead code",
     2: "hand-written fused Triton kernel (this project)",
 }
 
@@ -365,11 +367,11 @@ def chart_denoise(mode: str) -> None:
                ncol=3, frameon=False, fontsize=8.5, labelcolor=t["ink2"],
                handletextpad=0.6, borderpad=0.2, columnspacing=1.6)
 
-    fig.suptitle("Where a denoise step goes: 1232.6 us, 238 kernels", x=0.012,
+    fig.suptitle("Where a denoise step goes: 1185.0 us, 217 kernels", x=0.012,
                  ha="left", fontsize=14, fontweight="bold", color=t["ink"])
     fig.text(0.012, 0.912,
              "current build, nsys 2026.1.2, stream 157 (Stage-1 captured graph), "
-             "12 predicts x 10 steps - 10 steps = 12.33 ms of the 43.16 ms predict",
+             "12 predicts x 10 steps - 10 steps = 11.85 ms of the 42.90 ms predict",
              ha="left", fontsize=9, color=t["ink2"])
     fig.text(0.012, 0.013,
              "the 37 adaRMS dense(cond) projections that used to cost 395 us/step here "
