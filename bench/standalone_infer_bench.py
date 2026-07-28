@@ -33,6 +33,7 @@ Usage (inside the benchmark container):
 
 import argparse
 import json
+import os
 import statistics
 import time
 
@@ -119,8 +120,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dump-actions",
         default=None,
-        help="Write the deterministic first-call actions to this .pt file "
-        "(for the bit-exactness A/B against the RLinf container path).",
+        help="Write the seeded first-call actions to this .pt file, plus a "
+        "'<path>.meta.json' recording the compile mode and inductor's autotune "
+        "winners. NOT a stand-alone bit-exactness gate: under 'max-autotune' the "
+        "winners move between processes, so two runs of the SAME arm can differ by "
+        "~3e-3. Always run an off-vs-off control (tools/bitexact_gate.sh).",
     )
     parser.add_argument(
         "--clocks-json",
@@ -176,6 +180,36 @@ def verify_stage1(model) -> None:
         f"denoise graph captured: {model._denoise_graph_captured}  "
         f"signature: {model._denoise_graph_spec}"
     )
+
+
+def autotune_winners() -> dict:
+    """Inductor's runtime Triton autotune winners for this process.
+
+    Every generated pointwise/reduction kernel gets its launch config (XBLOCK,
+    R0_BLOCK, num_warps, ...) chosen by *benchmarking at first launch*, and under
+    ``max-autotune`` coordinate-descent tuning re-benchmarks the neighbourhood in
+    every process -- even on a warm ``TORCHINDUCTOR_CACHE_DIR``. For a reduction
+    that changes the accumulation split, so two processes running byte-identical
+    code can produce different numbers. Recording the winners next to a dump makes
+    that visible instead of leaving it to be discovered as a mystery diff.
+    """
+    import glob
+
+    root = os.environ.get("TORCHINDUCTOR_CACHE_DIR")
+    if not root:
+        from torch._inductor.runtime.cache_dir_utils import cache_dir
+
+        root = cache_dir()
+    out = {}
+    for p in glob.glob(os.path.join(root, "**", "*.best_config"), recursive=True):
+        try:
+            with open(p) as fh:
+                cfg = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            continue
+        cfg.pop("time_taken_ms", None)  # wall clock, not part of the choice
+        out[os.path.basename(p)[:16]] = cfg
+    return out
 
 
 def build_model(args: argparse.Namespace) -> torch.nn.Module:
@@ -465,7 +499,22 @@ def main() -> None:
         with torch.no_grad():
             ref = model.predict_action_batch(env_obs)
         torch.save(ref.detach().cpu(), args.dump_actions)
+        meta = {
+            "compile_mode": compile_desc,
+            "stage1": bool(args.stage1),
+            "seed": args.seed,
+            "torch": torch.__version__,
+            "gpu": torch.cuda.get_device_name(args.device),
+            "inductor_cache_dir": os.environ.get("TORCHINDUCTOR_CACHE_DIR", ""),
+            "autotune_winners": autotune_winners(),
+        }
+        with open(args.dump_actions + ".meta.json", "w") as fh:
+            json.dump(meta, fh, indent=1, sort_keys=True)
         print(f"wrote reference actions {tuple(ref.shape)} -> {args.dump_actions}")
+        print(
+            f"wrote {args.dump_actions}.meta.json "
+            f"({len(meta['autotune_winners'])} autotune winners)"
+        )
 
     run_e2e(model, env_obs, args)
     if args.phases:
