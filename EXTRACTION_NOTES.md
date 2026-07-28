@@ -197,6 +197,59 @@ reachable from the two retained data configs and was not vendored.
   the 6 removed bookkeeping kernels but is not resolved beyond the ±0.7 ms rebuild
   variance by a single pair.
 
+### 6.1 `36` prefix-KV D2D copies per predict is the *optimised* signature — not a regression
+
+Investigated 2026-07-28 after a profile of this package
+(`claude_mem/pi05_rollout_forward/20260728_pi05infer_vendored_pro5k/`) was read as evidence
+that the static KV buffer had been lost in the extraction. It had not. Recorded here because
+the number invites exactly that misreading a second time.
+
+The profile shows 1368 `copyKind=8` copies of 495 616 B over 38 predicts — **36/predict**,
+in one contiguous burst per predict (all 38 bursts are exactly 36 wide). 495 616 B =
+968 prefix tokens × 256 head_dim × 2 B, and 36 = 18 layers × {K, V}. That is
+`GemmaAttention.prime_kv_static` filling the prefix half of each layer's static buffer
+**once per predict**, which is precisely what the optimisation is supposed to cost: the
+prefix is rebuilt from a new observation every predict, so this can never be zero. The
+scale to compare against is:
+
+| prefix-sized D2D copies / predict | meaning |
+|--:|---|
+| **360** | `torch.cat` branch — the prefix re-materialised on all 10 denoise steps (un-optimised) |
+| **36** | static KV buffer active — prefix written once, before the loop |
+| 0 | not reachable; would require the prefix not to change between predicts |
+
+Runtime probe (eager build, one predict, both arms): `prime_kv_static` called once,
+**18/18 layers primed** at shape `(1, 1, 1018, 256)` with `_kv_prefix_len = 968`, all
+**180** attention calls (18 layers × 10 steps) take the static branch and **0** take
+`torch.cat`; device `copy_` sizes are `{495616: 36, 25600: 360}` — the 36 prefix writes
+plus the 360 (= 18 × 10 × 2) 50-token suffix tails. The **RLinf reference arm measures the
+same thing**, as it must: `pi05_infer/gemma/modeling_gemma.py` differs from the container's
+patched `transformers/models/gemma/modeling_gemma.py` only in imports and comments.
+
+In the compiled build the 360 suffix copies disappear into `_qkv_rope_kernel` (6840 in the
+profile = 38 predicts × 10 steps × 18 layers), leaving only the 36. Note that a live fused
+kernel is *by itself* proof that the buffer is primed: the fused branch is guarded on
+`self.kv_static_k is not None`, so it cannot run while the static path is inactive. The two
+can never disagree.
+
+The historical **−0.51 ms** for this optimisation stands. It was a plain wall-clock pair
+(45.61 → 45.10 ms), not an nsys number. The separately recorded "KV memcpy 42.6 → 0/predict"
+is a **different metric** that has been conflated with it: copies counted *inside the denoise
+loop only*, and credited to the Stage-1 CUDA graph, not to the static buffer.
+
+### 6.2 `_copy_kv_into_static` is dead work on the Stage-1 graph path (unmeasured, not changed)
+
+Code-evident, noticed during the above and left alone. On the graph path
+`_refresh_denoise_inputs` → `_copy_kv_into_static` copies the fresh prefix cache into the
+`DynamicCache` that was captured as a graph input — another 36 × 495 616 B ≈ 17.8 MB/predict.
+But the captured expert forward reads `self.kv_static_k`, and touches `past_key_value` only
+for an `is not None` test, so nothing ever reads what that copy wrote; `prime_kv_static`
+(line 336, which runs *before* the refresh) is what actually supplies the fresh prefix. A
+prior session measured this transfer at sub-0.1 ms, so the upside is small and deleting it
+would have to be re-validated against the graph capture. The benchmark does not call
+`capture_cuda_graph`, so this path is not exercised by `bench/standalone_infer_bench.py` and
+does not appear in the profile above.
+
 ## 7. Not done (out of scope for this task)
 
 - **Plan Stage 2, second half** — the *three-way merge* of `pi0_pytorch.py`
