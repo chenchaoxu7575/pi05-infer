@@ -7,9 +7,12 @@ from torch import Tensor
 from torch import nn
 import torch.nn.functional as F  # noqa: N812
 
+# Unmodified openpi modules: imported from the installed openpi, not vendored.
 import openpi.models.gemma as _gemma
-from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
 import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
+
+# Modified: our copy, which builds the action expert from pi05_infer.gemma.
+from pi05_infer.openpi_patched.gemma_pytorch import PaliGemmaWithExpertModel
 
 
 def get_safe_dtype(target_dtype, device_type):

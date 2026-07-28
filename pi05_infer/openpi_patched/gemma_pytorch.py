@@ -3,10 +3,26 @@ from typing import Literal
 import pytest
 import torch
 from torch import nn
-from transformers import GemmaForCausalLM
+
+# --- prefix: stock transformers -------------------------------------------------
+# PaliGemmaForConditionalGeneration builds its text tower through
+# AutoModel.from_config(config.text_config), i.e. transformers.models.gemma. The
+# prefix therefore keeps using the installed transformers, untouched by us.
 from transformers import PaliGemmaForConditionalGeneration
 from transformers.models.auto import CONFIG_MAPPING
+
+# `apply_rotary_pos_emb`, `eager_attention_forward` and `_gated_residual` are used
+# below only by the *joint* prefix+suffix training path, and are byte-identical
+# between stock transformers and our fork (they are not among the symbols we
+# modified), so they are taken from transformers rather than re-vendored.
 from transformers.models.gemma import modeling_gemma
+
+# --- expert: our vendored fork --------------------------------------------------
+# This is the ONLY construction-site difference. GemmaForCausalLM here is
+# pi05_infer.gemma.modeling_gemma.GemmaForCausalLM, so the expert's GemmaModel /
+# GemmaDecoderLayer / GemmaAttention / GemmaMLP / GemmaRMSNorm all come from this
+# package and carry the adaRMS table, fused QKV, static KV and Triton fusions.
+from pi05_infer.gemma.modeling_gemma import GemmaForCausalLM
 
 
 class PaliGemmaWithExpertModel(nn.Module):

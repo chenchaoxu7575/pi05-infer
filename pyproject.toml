@@ -16,11 +16,10 @@ dependencies = []
 [tool.setuptools.packages.find]
 include = ["pi05_infer*"]
 
-# NOTE: pi05_infer/gemma/ and pi05_infer/openpi_patched/ deliberately have no
-# __init__.py, so setuptools does not treat them as packages and they cannot be
-# imported by accident. They are version-controlled rescue copies of files that
-# currently live in the container's site-packages (Stage 0); wiring the package to
-# use them instead of site-packages is Stage 2 and has NOT been done.
+# NOTE: pi05_infer/gemma/ and pi05_infer/openpi_patched/ are the vendored forks the
+# package actually runs (Stage 2 done). They are excluded from ruff below because
+# they are near-verbatim third-party files -- reformatting them would destroy the
+# diff against their upstreams, which is the only way to audit what we changed.
 
 [tool.ruff]
 line-length = 90

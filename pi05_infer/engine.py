@@ -57,14 +57,19 @@ if os.environ.get("RLINF_DISABLE_OPENPI_TYPECHECK") == "1":
 from openpi import transforms as _transforms  # noqa: E402
 from openpi.models import model as _model  # noqa: E402
 from openpi.models.pi0_config import Pi0Config  # noqa: E402
-from openpi.models_pytorch.pi0_pytorch import (  # noqa: E402
-    PI0Pytorch,
-    make_att_2d_masks,
-)
 from torch.utils._pytree import tree_map  # noqa: E402
 
 from pi05_infer._vendored.base_policy import BasePolicy  # noqa: E402
 from pi05_infer._vendored.nvtx import nvtx_range  # noqa: E402
+
+# The vendored fork, NOT ``openpi.models_pytorch.pi0_pytorch``: this is what makes
+# the action expert resolve to ``pi05_infer.gemma`` rather than to whatever
+# ``transformers.models.gemma`` the container happens to have. See
+# ``pi05_infer/openpi_patched/__init__.py``.
+from pi05_infer.openpi_patched.pi0_pytorch import (  # noqa: E402
+    PI0Pytorch,
+    make_att_2d_masks,
+)
 
 logger = logging.getLogger(__name__)
 
