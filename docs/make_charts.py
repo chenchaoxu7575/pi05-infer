@@ -30,7 +30,8 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.patches import BoxStyle, FancyBboxPatch  # noqa: E402
+from matplotlib.path import Path as MplPath  # noqa: E402
+from matplotlib.patches import PathPatch  # noqa: E402
 
 OUT = Path(__file__).resolve().parent
 
@@ -92,13 +93,28 @@ def _chrome(ax, t: dict, xgrid: bool = True) -> None:
     ax.tick_params(length=0)
 
 
+_KAPPA = 0.5522847498307936  # circle -> cubic-Bezier control-point ratio
+
+
 def _rounded_hbar(ax, y, x0, x1, height, color, radius_pt=4.0, zorder=3):
     """Horizontal bar with ~4pt-rounded ends, drawn in data coordinates.
 
-    matplotlib has no rounded bars, so this is a FancyBboxPatch whose corner
-    radius is converted from points to *both* data axes (they have different
-    scales), with ``mutation_aspect`` carrying the x->y ratio.  Call it only
-    after the axes limits and the subplot geometry are final.
+    matplotlib has no rounded bars.  The obvious construction -- a
+    ``FancyBboxPatch`` with ``boxstyle="Round"`` and ``mutation_aspect``
+    carrying the x->y scale ratio -- is *not* usable here: ``mutation_aspect``
+    divides the box height, runs the corner rounding, then scales back, so at
+    the aspect ratios these charts use (chart 2 is ~0.038 data units of y per
+    data unit of x) the intermediate box degenerates and the patch renders at
+    full row height, one solid band per bar.  Chart 1 (aspect ~1.4) survives
+    it, which is why only chart 2 ever looked broken.
+
+    So the path is built explicitly instead: a rectangle whose four corners are
+    circular arcs of ``radius_pt`` points, with the point->data conversion done
+    separately per axis so the arcs are round *on screen*.  No mutation, no
+    aspect handling, identical output on any matplotlib version.
+
+    Call it only after the axes limits and the subplot geometry are final --
+    the conversion reads ``ax.get_window_extent()``.
     """
     fig = ax.figure
     bbox = ax.get_window_extent()
@@ -106,17 +122,38 @@ def _rounded_hbar(ax, y, x0, x1, height, color, radius_pt=4.0, zorder=3):
     yr = ax.get_ylim()[1] - ax.get_ylim()[0]
     px_per_x = bbox.width / xr
     px_per_y = bbox.height / yr
-    r_px = radius_pt * fig.dpi / 72.0
-    r_x = min(r_px / px_per_x, abs(x1 - x0) / 2.0)
-    r_y = min(r_px / px_per_y, height / 2.0)
-    r_x = min(r_x, r_y * px_per_y / px_per_x)
-    r_y = r_x * px_per_x / px_per_y
-    p = FancyBboxPatch(
-        (min(x0, x1), y - height / 2),
-        abs(x1 - x0),
-        height,
-        boxstyle=BoxStyle("Round", pad=0, rounding_size=r_x),
-        mutation_aspect=r_y / r_x if r_x else 1.0,
+
+    xa, xb = min(x0, x1), max(x0, x1)
+    ya, yb = y - height / 2.0, y + height / 2.0
+
+    # one radius in pixels, clamped so it can never exceed half the bar in
+    # either direction, then converted back into each axis' data units
+    r_px = min(
+        radius_pt * fig.dpi / 72.0,
+        (xb - xa) / 2.0 * px_per_x,
+        height / 2.0 * px_per_y,
+    )
+    rx = r_px / px_per_x
+    ry = r_px / px_per_y
+    k = 1.0 - _KAPPA
+
+    verts = [
+        (xa + rx, ya),  # start after the bottom-left corner
+        (xb - rx, ya),  # bottom edge
+        (xb - rx * k, ya), (xb, ya + ry * k), (xb, ya + ry),  # bottom-right arc
+        (xb, yb - ry),  # right edge
+        (xb, yb - ry * k), (xb - rx * k, yb), (xb - rx, yb),  # top-right arc
+        (xa + rx, yb),  # top edge
+        (xa + rx * k, yb), (xa, yb - ry * k), (xa, yb - ry),  # top-left arc
+        (xa, ya + ry),  # left edge
+        (xa, ya + ry * k), (xa + rx * k, ya), (xa + rx, ya),  # bottom-left arc
+        (xa + rx, ya),
+    ]
+    C, L, M = MplPath.CURVE4, MplPath.LINETO, MplPath.MOVETO
+    codes = [M, L, C, C, C, L, C, C, C, L, C, C, C, L, C, C, C, MplPath.CLOSEPOLY]
+
+    p = PathPatch(
+        MplPath(verts, codes),
         linewidth=0,
         facecolor=color,
         zorder=zorder,
@@ -179,6 +216,8 @@ def chart_ledger(mode: str) -> None:
     ax.axvline(PEER_MS, color=t["s2"], lw=1.6, ls=(0, (4, 3)), zorder=2)
     ax.text(PEER_MS + 0.16, n - 0.10, PEER_LABEL, ha="left", va="top",
             fontsize=8.5, color=t["s2"])
+    ax.text(PEER_MS + 0.16, n - 0.42, "separate session - not a paired A/B",
+            ha="left", va="top", fontsize=7.5, color=t["muted"])
 
     prev = base
     for y, (label, after, delta, _src) in zip(ys, rows):
@@ -294,13 +333,15 @@ def chart_denoise(mode: str) -> None:
     t = THEMES[mode]
     _style(t)
     colors = {0: t["s1"], 1: t["s2"], 2: t["s3"]}
-    fig, ax = plt.subplots(figsize=(10.5, 5.0), dpi=200)
+    fig, ax = plt.subplots(figsize=(10.5, 5.4), dpi=200)
 
     n = len(DENOISE)
     ys = list(range(n))[::-1]
-    ax.set_xlim(0, 392)
+    # headroom on the right so the longest value label ("312.5 us  18/step",
+    # on the top bar) clears the figure edge instead of being clipped
+    ax.set_xlim(0, 432)
     ax.set_ylim(-0.7, n - 0.3)
-    fig.subplots_adjust(left=0.415, right=0.985, top=0.865, bottom=0.115)
+    fig.subplots_adjust(left=0.415, right=0.985, top=0.875, bottom=0.205)
     _chrome(ax, t)
 
     for y, (label, us, kern, grp) in zip(ys, DENOISE):
@@ -318,16 +359,19 @@ def chart_denoise(mode: str) -> None:
                    label=GROUP_NAMES[g])
         for g in (2, 0, 1)
     ]
-    ax.legend(handles=handles, loc="lower right", frameon=False, fontsize=8.5,
-              labelcolor=t["ink2"], handletextpad=0.6, borderpad=0.2)
+    # figure-level, below the axes: inside the axes the legend sat on top of
+    # the two shortest bars' rows
+    fig.legend(handles=handles, loc="lower left", bbox_to_anchor=(0.010, 0.048),
+               ncol=3, frameon=False, fontsize=8.5, labelcolor=t["ink2"],
+               handletextpad=0.6, borderpad=0.2, columnspacing=1.6)
 
     fig.suptitle("Where a denoise step goes: 1232.6 us, 238 kernels", x=0.012,
                  ha="left", fontsize=14, fontweight="bold", color=t["ink"])
-    fig.text(0.012, 0.905,
+    fig.text(0.012, 0.912,
              "current build, nsys 2026.1.2, stream 157 (Stage-1 captured graph), "
              "12 predicts x 10 steps - 10 steps = 12.33 ms of the 43.16 ms predict",
              ha="left", fontsize=9, color=t["ink2"])
-    fig.text(0.012, 0.015,
+    fig.text(0.012, 0.013,
              "the 37 adaRMS dense(cond) projections that used to cost 395 us/step here "
              "(triton_per_fused_addmm_0, 300 instances) are gone - 0 instances",
              ha="left", fontsize=7.5, color=t["muted"])
@@ -379,7 +423,9 @@ def chart_phases(mode: str) -> None:
     ax.set_yticks([])
     ax.set_xticks([])
     ax.tick_params(length=0)
-    fig.subplots_adjust(left=0.012, right=0.988, top=0.66, bottom=0.10)
+    # right < 0.99 so the last segment's right-aligned label ("prefix: SigLIP
+    # vision, 3 views") keeps a margin instead of running into the figure edge
+    fig.subplots_adjust(left=0.012, right=0.972, top=0.66, bottom=0.10)
 
     gap = PHASE_TOTAL * 0.0045  # 2px surface gap between segments
     x = 0.0
