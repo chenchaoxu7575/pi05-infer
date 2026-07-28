@@ -32,17 +32,54 @@ pi05_infer/
   dataconfig/          minimal subset of RLinf's openpi dataconfigs (turtle + libero).
   _vendored/           verbatim copies of RLinf helpers with no RLinf dependency:
                        base_policy.py, cuda_graph.py, nvtx.py
-  gemma/               *** RESCUE ONLY, NOT IMPORTED ***  the container's patched
-                       modeling_gemma.py (1107 L) + rlinf_fused_denoise.py (552 L)
-  openpi_patched/      *** RESCUE ONLY, NOT IMPORTED ***  the container's patched
-                       pi0_pytorch.py + gemma_pytorch.py
+  gemma/               the Gemma fork the ACTION EXPERT runs: modeling_gemma.py
+                       (+245 L over transformers) + rlinf_fused_denoise.py (two
+                       Triton fusions). Imported; nothing else uses it.
+  openpi_patched/      the two openpi files we modified: pi0_pytorch.py +
+                       gemma_pytorch.py. Imported instead of openpi's copies.
 bench/
   standalone_infer_bench.py   latency benchmark (e2e, phases, nsys, action dump)
 tools/
+  isolation_check.py          proves expert = pi05_infer.gemma, prefix = transformers
   bitgate.py                  bit-exactness gate for the two Triton fusion kernels
   ab_rlinf_reference.py       reference arm: same harness driving the RLinf path
 _extract_src/                 the un-refactored RLinf sources this was extracted from
 ```
+
+### The prefix / expert split
+
+`import pi05_infer` pulls in **its own** model code. Nothing here reads
+`transformers.models.gemma` or `openpi.models_pytorch.pi0_pytorch` for the parts we
+modified:
+
+```
+engine.OpenPi0Inference
+  └─ pi05_infer.openpi_patched.pi0_pytorch.PI0Pytorch
+       └─ pi05_infer.openpi_patched.gemma_pytorch.PaliGemmaWithExpertModel
+            ├─ paligemma    = transformers.PaliGemmaForConditionalGeneration   ← STOCK
+            │                   └─ text tower via AutoModel.from_config
+            │                        → transformers.models.gemma.modeling_gemma
+            └─ gemma_expert = pi05_infer.gemma.modeling_gemma.GemmaForCausalLM ← OURS
+```
+
+That one construction site is the whole enforcement mechanism, and
+`tools/isolation_check.py` asserts it module by module. The separation is not
+cosmetic: the +4 ms regression during the fusion work happened because PaliGemma's
+*prefix* language model is also a Gemma, so overwriting `transformers/models/gemma/`
+globally made a kernel tuned for the 50-token denoise suffix fire on the 968-token
+prefix. With the expert holding its own module, that class of bug cannot occur —
+prefix and expert are now different classes from different files.
+
+**What is ours vs. what is imported.** Only the symbols we actually changed are
+vendored. `modeling_gemma.py` imports every unmodified symbol it needs
+(`GemmaConfig`, `PreTrainedModel`, `GenerationMixin`, `GradientCheckpointingLayer`,
+`ALL_ATTENTION_FUNCTIONS`, `create_causal_mask`, the rope utils, the output
+dataclasses, `ACT2FN`, `Cache`/`DynamicCache`, `Unpack`, `auto_docstring` …) from the
+installed `transformers`; `pi0_pytorch.py` imports `openpi.models.gemma` and
+`openpi.models_pytorch.preprocessing_pytorch` from the installed openpi. See
+`EXTRACTION_NOTES.md` §8 for the full boundary, including the one thing this does
+*not* buy independence from (openpi's own `transformers_replace` patch, which the
+**prefix** needs).
 
 ### Vendored from where
 
@@ -90,10 +127,13 @@ docker exec -w /workspace/rlinf_pub/pi05-infer pi05bench \
 `pi05-infer` does **not** touch `site-packages`; it only adds a path entry. The
 container stays in its current working state so it can be A/B'd against.
 
-> The package currently resolves `transformers.models.gemma` and
-> `openpi.models_pytorch.pi0_pytorch` from the container's *already-patched*
-> site-packages. `pi05_infer/gemma/` and `pi05_infer/openpi_patched/` are rescue
-> copies that are not yet wired in (plan Stage 2).
+> The container's `transformers/models/gemma/` still carries the old global
+> overwrite (that is deliberate — it is the reference arm of the A/B). The package
+> no longer *uses* it for the expert. Because `torch.library` namespaces are
+> process-global and both copies of `rlinf_fused_denoise.py` get imported in the
+> same process, this package registers its custom ops as `pi05_infer::gate_up_swiglu`
+> / `pi05_infer::qkv_rope_kv` rather than `rlinf::*`; otherwise the second
+> registration would raise and silently disable the fusions.
 
 ## Run the benchmark
 
@@ -119,9 +159,13 @@ Rebuild variance is ±0.7 ms, so a single run cannot resolve a small regression;
 ## Verification
 
 ```bash
+# 0. isolation: expert must be pi05_infer.gemma, PaliGemma prefix must be transformers
+/opt/venv/openpi/bin/python tools/isolation_check.py            # prints ISOLATION_OK
+
 # 1. bit-exactness of the two Triton fusion kernels vs inductor's compiled output
-/opt/venv/openpi/bin/python tools/bitgate.py                    # deployed copy
-/opt/venv/openpi/bin/python tools/bitgate.py pi05_infer/gemma   # rescued copy
+/opt/venv/openpi/bin/python tools/bitgate.py                    # the vendored copy
+/opt/venv/openpi/bin/python tools/bitgate.py \
+    /opt/venv/openpi/lib/python3.11/site-packages/transformers/models/gemma
 
 # 2. numerical A/B of the whole path, fixed seed
 /opt/venv/openpi/bin/python tools/ab_rlinf_reference.py --dump-actions /tmp/ref.pt
@@ -170,6 +214,33 @@ below attributes exactly to the 6 removed per-predict RL-bookkeeping kernels.
 | the same two gates against the **rescued** `pi05_infer/gemma` copy | bitwise equal, `max|Δ| = 0.00e+00` |
 | end-to-end actions, `pi05_infer` vs RLinf path, fixed seed, `[1,50,6]` float64 | **bitwise equal, `max|Δ| = 0.00e+00`** |
 
+### Re-measured 2026-07-28, after the package was switched onto its own `gemma/`
+
+Same box, same harness. Paired B A B A in one session, 30 iterations each:
+
+| run | arm | mean | p50 | min / max | clocks |
+|---|---|--:|--:|--:|---|
+| B1 | `pi05_infer` (vendored expert) | **44.29 ms** | 44.27 | 43.52 / 45.21 | 2445 MHz, 240.1 W |
+| A1 | RLinf reference | 44.37 | 44.21 | 43.75 / 45.32 | — |
+| B2 | `pi05_infer` (vendored expert) | **44.05 ms** | 44.03 | 43.56 / 44.42 | 2438 MHz, 208.8 W |
+| A2 | RLinf reference | 44.97 | 44.91 | 44.34 / 45.70 | — |
+
+B mean 44.17 vs A mean 44.67 → Δ = −0.50 ms, reproducing the pre-change −0.52 ms to
+0.02 ms at comparable SM clocks. Absolute B moved +0.16 ms vs the 44.01 ms above,
+inside the ±0.7 ms rebuild variance.
+
+| check (after the change) | result |
+|---|---|
+| isolation, `tools/isolation_check.py` | `ISOLATION_OK` — expert `pi05_infer.gemma.modeling_gemma`, prefix `transformers.models.gemma.modeling_gemma` |
+| `tools/bitgate.py` on `pi05_infer/gemma` (both fusions, q/k/v) | bitwise equal, `max|Δ| = 0.00e+00` |
+| end-to-end actions vs the RLinf path, fixed seed | **bitwise equal, `max|Δ| = 0.00e+00`** |
+| denoise kernels/step | 234.90, unchanged |
+| prefix stream-7 kernels/predict | 1018.00, unchanged |
+| every per-category kernel count, streams 7 / 157 / 158 | identical pre vs post, both arms |
+
+Full detail, including the pre/post nsys table and what the vendoring does *not*
+isolate, in `EXTRACTION_NOTES.md` §8.
+
 **Kernels** — nsys 2026.1.2, `-t cuda,nvtx --cuda-graph-trace=node
 --gpu-metrics-devices=cuda-visible`, 12 predicts inside `cudaProfilerApi`:
 
@@ -199,6 +270,13 @@ arm A, i.e. the code that produced the 238 figure, measures 234.90 with this too
 
 ## Not done
 
-Plan stages 2–4: the three-way merge of the openpi-side files, switching the package
-onto its own vendored `gemma/`, rewiring RLinf onto this engine, and cleaning the
-container. See `EXTRACTION_NOTES.md` §6.
+- the **three-way merge** of the openpi-side files (`patches/` × fork × runtime) and
+  vendoring `model.py` + `array_typing.py` — it would change behaviour (the
+  `array_typing` typecheck patch is currently *not* applied; enabling it moves e2e by
+  ~3.2 ms), so it needs its own A/B;
+- **plan stage 3**, rewiring RLinf's `openpi_action_model.py` onto this engine;
+- **plan stage 4**, restoring the container's `site-packages` to openpi-pristine and
+  clearing the 11 `.bak_*` files. The vendoring makes this possible; it was not done
+  because the patched copy is the reference arm of the A/B.
+
+See `EXTRACTION_NOTES.md` §7–§8.

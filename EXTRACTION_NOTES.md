@@ -49,12 +49,11 @@ being destroyed:
 | `pi05_infer/openpi_patched/pi0_pytorch.py` | `openpi/models_pytorch/pi0_pytorch.py` | 480 | `91a4a79c…` |
 | `pi05_infer/openpi_patched/gemma_pytorch.py` | `openpi/models_pytorch/gemma_pytorch.py` | 285 | `ea915248…` |
 
-**These two directories are not Python packages** (no `__init__.py`) and are **not
-imported by anything**. They are rescue copies only. `pi05_infer` at Stage 1 still
-resolves `transformers.models.gemma` and `openpi.models_pytorch.pi0_pytorch` from the
-container's site-packages — i.e. from the same already-patched files that produced the
-measured numbers. Making the package use its own vendored copies is **Stage 2 of the
-plan and has NOT been done**; see §6.
+At Stage 1 these were rescue copies only: not packages, not imported, and
+`pi05_infer` still resolved `transformers.models.gemma` and
+`openpi.models_pytorch.pi0_pytorch` from the container's site-packages. **Stage 2
+(§8) wired the package onto them**; the four files above are now the code that
+actually runs, and the table above is their provenance.
 
 ---
 
@@ -156,17 +155,15 @@ reachable from the two retained data configs and was not vendored.
 
 ## 5. Couplings that remain
 
-1. **openpi.** `engine.py` imports `openpi.transforms`, `openpi.models.model`,
-   `openpi.models.pi0_config.Pi0Config` and subclasses
-   `openpi.models_pytorch.pi0_pytorch.PI0Pytorch`. This is by design (the plan keeps
-   openpi installed for `Observation`, transforms and checkpoint loading).
-2. **The patched site-packages.** The measured performance depends on the container's
-   *modified* `transformers/models/gemma/modeling_gemma.py` (+245 lines) and on the
-   modified `openpi/models_pytorch/pi0_pytorch.py`. `pi05_infer` does not yet supply
-   these itself — it inherits whatever the container has. On a pristine openpi install
-   the package will import and run but will be slower and `build_adarms_stack` /
-   `build_qkv_fused` / `prime_kv_static` will be missing (`enable_torch_compile` calls
-   the first two **without** a `hasattr` guard, so it would raise).
+1. **openpi.** `engine.py` imports `openpi.transforms`, `openpi.models.model` and
+   `openpi.models.pi0_config.Pi0Config`, and subclasses `PI0Pytorch` — since Stage 2
+   the *vendored* `pi05_infer.openpi_patched.pi0_pytorch.PI0Pytorch`, which itself
+   still imports `openpi.models.gemma` and `openpi.models_pytorch.preprocessing_pytorch`.
+   This is by design (the plan keeps openpi installed for `Observation`, transforms
+   and checkpoint loading).
+2. ~~**The patched site-packages.**~~ **Closed by Stage 2** for the expert; see §8.
+   The remaining site-packages dependency is openpi's own `transformers_replace`
+   patch, which the **PaliGemma prefix** needs — §8.4.
 3. **`RLINF_DISABLE_OPENPI_TYPECHECK`.** The env-var gate that no-ops openpi's
    `@at.typecheck` is copied as-is, including its `RLINF_` prefix, so a single env var
    still controls both codebases. Default off in both, so both arms of the A/B pay the
@@ -202,13 +199,209 @@ reachable from the two retained data configs and was not vendored.
 
 ## 7. Not done (out of scope for this task)
 
-- **Plan Stage 2** — the three-way merge of `pi0_pytorch.py` (patches / fork / runtime)
-  and vendoring `model.py` + `array_typing.py`, and switching the package onto its own
-  `pi05_infer/gemma`. Not attempted: it changes behaviour (in particular the
-  `array_typing` typecheck patch is currently *not* applied and enabling it would move
-  e2e by ~3.2 ms), which conflicts with this task's "no behaviour changes /
-  reproduce 43.7 ms" gate. Do it as its own change with its own A/B.
+- **Plan Stage 2, second half** — the *three-way merge* of `pi0_pytorch.py`
+  (patches / fork / runtime) and vendoring `model.py` + `array_typing.py`. Still not
+  attempted: it changes behaviour (in particular the `array_typing` typecheck patch is
+  currently *not* applied and enabling it would move e2e by ~3.2 ms), which conflicts
+  with the "no behaviour change" gate. Do it as its own change with its own A/B.
+  (The *first* half of Stage 2 — switching the package onto its own `pi05_infer/gemma`
+  and `pi05_infer/openpi_patched` — is done; see §8.)
 - **Plan Stage 3** — rewiring RLinf's `openpi_action_model.py` onto this engine.
   Explicitly excluded by the brief.
 - **Plan Stage 4** — cleaning the container's 11 `.bak_*` files, restoring
-  site-packages to pristine, adding `pi05-infer` to `install.sh`.
+  site-packages to pristine, adding `pi05-infer` to `install.sh`. Stage 2 is the
+  prerequisite for the site-packages restore and is now in place, but the restore
+  itself was deliberately **not** done: the container's patched
+  `transformers/models/gemma/` is the reference arm of the A/B.
+
+---
+
+## 8. Stage 2 (first half) — the package now runs its own model code
+
+Before this change, `pi05_infer/gemma/` and `pi05_infer/openpi_patched/` were inert
+rescue copies and the running code came from the container's globally-overwritten
+`transformers` / `openpi`. Now `import pi05_infer` pulls in the vendored files.
+
+### 8.1 The edits
+
+Six changes, all imports / module plumbing except the one in 8.3:
+
+| file | change |
+|---|---|
+| `pi05_infer/gemma/__init__.py` | **new** — makes the directory a package (needed for `modeling_gemma`'s `from . import rlinf_fused_denoise`) |
+| `pi05_infer/gemma/modeling_gemma.py` | the 12 `...`-relative + 1 `.`-relative imports → absolute `transformers.*` imports. No other line touched. |
+| `pi05_infer/gemma/rlinf_fused_denoise.py` | custom-op registration namespace `rlinf::` → `pi05_infer::` (see 8.3) |
+| `pi05_infer/openpi_patched/__init__.py` | **new** — makes the directory a package |
+| `pi05_infer/openpi_patched/gemma_pytorch.py` | `from transformers import GemmaForCausalLM` → `from pi05_infer.gemma.modeling_gemma import GemmaForCausalLM` |
+| `pi05_infer/openpi_patched/pi0_pytorch.py` | `from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel` → `from pi05_infer.openpi_patched.gemma_pytorch import …` |
+| `pi05_infer/engine.py` | `from openpi.models_pytorch.pi0_pytorch import PI0Pytorch, make_att_2d_masks` → `from pi05_infer.openpi_patched.pi0_pytorch import …` |
+
+Not one line of kernel code, model code, tile config or numerics changed. `BLOCK_K`
+stays 64 (SwiGLU) / 128 (QKV); `RLINF_FUSE_SWIGLU`, `RLINF_FUSE_QKV_ROPE`,
+`RLINF_FUSE_*_CFG` and `RLINF_FUSE_SWIGLU_MAX_M` keep their names and defaults; both
+PyTorch fallbacks are untouched.
+
+### 8.2 Vendored vs. imported from `transformers` / `openpi`
+
+The rule applied: **import anything we did not modify.** `modeling_gemma.py` is a
+whole-file fork, so it necessarily carries unmodified classes too
+(`GemmaRotaryEmbedding`, `GemmaForCausalLM`, `GemmaForSequenceClassification`,
+`GemmaForTokenClassification`, `eager_attention_forward`, `apply_rotary_pos_emb`,
+`_gated_residual`) — those are not "vendored decisions", they are the file's own
+contents. Everything the file *references* is imported:
+
+| symbol | source | why |
+|---|---|---|
+| `GemmaConfig` | `transformers.models.gemma.configuration_gemma` | not modified by us (it *is* modified by openpi's `transformers_replace`, which adds `use_adarms` / `adarms_cond_dim`) |
+| `PreTrainedModel`, `ALL_ATTENTION_FUNCTIONS` | `transformers.modeling_utils` | unmodified |
+| `GradientCheckpointingLayer` | `transformers.modeling_layers` | unmodified |
+| `GenerationMixin` | `transformers.generation` | unmodified |
+| `create_causal_mask` | `transformers.masking_utils` | unmodified |
+| `FlashAttentionKwargs` | `transformers.modeling_flash_attention_utils` | unmodified |
+| `BaseModelOutputWithPast` &c. | `transformers.modeling_outputs` | unmodified |
+| `ROPE_INIT_FUNCTIONS`, `dynamic_rope_update` | `transformers.modeling_rope_utils` | unmodified |
+| `ACT2FN` | `transformers.activations` | unmodified |
+| `Cache`, `DynamicCache` | `transformers.cache_utils` | unmodified |
+| `Unpack` | `transformers.processing_utils` | unmodified |
+| `LossKwargs`, `auto_docstring`, `can_return_tuple`, `logging` | `transformers.utils` | unmodified |
+| `PaliGemmaForConditionalGeneration`, `CONFIG_MAPPING` | `transformers` | the **prefix**; deliberately stock |
+| `modeling_gemma.{apply_rotary_pos_emb, eager_attention_forward, _gated_residual}` used by `gemma_pytorch.py` | `transformers.models.gemma` | unmodified by us, and only reached on the joint prefix+suffix *training* path, which inference never takes |
+| `openpi.models.gemma`, `openpi.models_pytorch.preprocessing_pytorch` | openpi | unmodified |
+| `openpi.transforms`, `openpi.models.model`, `openpi.models.pi0_config` | openpi | unmodified |
+
+Only two openpi files carry local modifications and hence are vendored:
+`pi0_pytorch.py` (batched SigLIP; device-side `att_masks`) and `gemma_pytorch.py`
+(`adarms_mod` plumbing; expert construction). Everything else in openpi is imported.
+
+### 8.3 The one non-import change: custom-op namespace
+
+`torch.library` namespaces are **process-global**. `transformers.models.gemma` is
+still imported in every run (the prefix needs it), and in the current container that
+copy still does `from . import rlinf_fused_denoise`, registering `rlinf::gate_up_swiglu`
+and `rlinf::qkv_rope_kv`. Registering the same names from `pi05_infer/gemma` would
+raise; `modeling_gemma` catches that (`except Exception: _FUSED_OPS = None`), so the
+failure mode is **silent loss of both fusions** in whichever copy imports second —
+i.e. an unannounced perf regression, exactly the class of bug this task exists to
+remove. The vendored ops are therefore registered as `pi05_infer::gate_up_swiglu` /
+`pi05_infer::qkv_rope_kv`. Op *name*, kernel source, tile configs, guards, fallbacks
+and env-var names are unchanged; only the registration namespace differs, and the
+GPU-side kernel names in nsys are unaffected.
+
+### 8.4 What this does NOT isolate us from (the boundary)
+
+**openpi's `transformers_replace` patch is still required — by the prefix.** openpi
+ships modified `transformers/models/{gemma,paligemma,siglip}` files and its own
+`install.sh` copies them into site-packages; `pi0_pytorch.py` even asserts they are
+installed. Those files add the adaRMS API (`GemmaRMSNorm.forward` returning
+`(hidden, gate)`, `adarms_cond` on the model/layer forwards, `_gated_residual`,
+`use_adarms` on `GemmaConfig`). The PaliGemma prefix is built by
+`PaliGemmaForConditionalGeneration` → `AutoModel.from_config`, i.e. from
+site-packages, and `gemma_pytorch.py` calls it with `adarms_cond=`. On a *vanilla
+upstream* transformers 4.53.2 that call would break.
+
+So "pristine site-packages" here means **openpi-installed** (transformers +
+`transformers_replace`), not upstream-vanilla. That is the deliberate boundary:
+
+* **removed** — the dependency on *our* +245-line overwrite of
+  `transformers/models/gemma/modeling_gemma.py` and on the copy of
+  `rlinf_fused_denoise.py` next to it. That overwrite was never part of any install
+  chain and was the actual hazard.
+* **kept** — the dependency on openpi's own patch, which openpi installs itself and
+  which the *prefix* (not the expert) needs.
+
+Isolating the prefix too would mean vendoring PaliGemma + SigLIP + a second Gemma,
+i.e. re-vendoring most of openpi's `transformers_replace` for no benefit: the prefix
+is the part we did **not** modify, and keeping it on the shared copy is what makes
+"expert ≠ prefix" checkable in one line.
+
+Verified on the analysis box, whose transformers has `transformers_replace` applied
+but **not** our overwrite (no `_FUSED_OPS` in `transformers.models.gemma`): the
+package imports, builds the expert from `pi05_infer.gemma`, and registers both custom
+ops. That is the "pristine site-packages" case.
+
+Two consequences of leaving the container as-is, both harmless:
+
+1. Both copies of `rlinf_fused_denoise.py` are imported and both compile their Triton
+   kernels — but only on first use, and the prefix never reaches a fused kernel
+   (`_SWIGLU_MAX_M = 64` < 968, so `fused_gate_up_swiglu` returns `None` and the
+   prefix falls back to eager). Identical to the measured baseline.
+2. When site-packages is eventually restored, the prefix loses even that per-layer
+   `None`-returning check. Strictly less CPU work; nothing else changes.
+
+### 8.5 Verification
+
+Run on the GPU box, RTX PRO 5000 72 GB Blackwell (sm_120), 300 W cap, one job at a
+time, `pi05_turtle`, bs=1, 10 denoise steps, 3 × 128² cameras, `max-autotune`.
+
+**Isolation** (`tools/isolation_check.py`, prints every module path):
+
+```
+expert ForCausalLM / GemmaModel / decoder layer / attention / MLP / RMSNorm
+                                           pi05_infer.gemma.modeling_gemma
+prefix GemmaModel / decoder layer / attention / MLP / RMSNorm
+                                           transformers.models.gemma.modeling_gemma
+prefix PaliGemma       transformers.models.paligemma.modeling_paligemma
+prefix vision tower    transformers.models.siglip.modeling_siglip
+expert _FUSED_OPS      /workspace/rlinf_pub/pi05-infer/pi05_infer/gemma/rlinf_fused_denoise.py
+torch.ops.pi05_infer.{gate_up_swiglu,qkv_rope_kv}   True
+ISOLATION_OK
+```
+
+**Bit-exactness**
+
+| check | result |
+|---|---|
+| `tools/bitgate.py` (now defaults to `pi05_infer/gemma`) — SwiGLU vs inductor | bitwise equal, `max|Δ| = 0.00e+00`, 0/204800 elems differing |
+| … QKV+RoPE q / k / v vs inductor | bitwise equal, `max|Δ| = 0.00e+00`; q strides identical `(102400,256,2048,1)` |
+| end-to-end actions `[1,50,6]` float64, fixed seed, vs the RLinf path | **bitwise equal, `max|Δ| = 0.00e+00`** |
+
+**Latency** — paired, alternating B A B A in one session, 30 timed iterations each
+after 8 warmups, plain wall clock, GPU otherwise idle:
+
+| run | arm | mean | p50 | min / max | SM clock, power |
+|---|---|--:|--:|--:|---|
+| B1 | `pi05_infer` (vendored) | 44.29 | 44.27 | 43.52 / 45.21 | 2445 MHz (2422–2460), 240.1 W |
+| A1 | RLinf reference | 44.37 | 44.21 | 43.75 / 45.32 | not sampled |
+| B2 | `pi05_infer` (vendored) | 44.05 | 44.03 | 43.56 / 44.42 | 2438 MHz (2370–2452), 208.8 W |
+| A2 | RLinf reference | 44.97 | 44.91 | 44.34 / 45.70 | not sampled |
+| — | **B mean 44.17 vs A mean 44.67** | | | | Δ = −0.50 ms |
+
+The pre-change measurement was B 44.01 / A 44.53 at 2445 MHz, i.e. Δ = −0.52 ms. The
+paired gap is reproduced to 0.02 ms; the absolute B number moved +0.16 ms, well inside
+the documented ±0.7 ms rebuild variance, at a comparable clock.
+
+**Kernels** — nsys 2026.1.2, `-t cuda,nvtx --cuda-graph-trace=node
+--gpu-metrics-devices=cuda-visible`, 12 predicts inside `cudaProfilerApi`, exported to
+sqlite with the same binary. `_s2` = after this change; the pre-change profiles from
+the previous task were kept and re-counted with the same tools.
+
+| | `pi05_infer` pre | `pi05_infer` post | RLinf pre | RLinf post |
+|---|--:|--:|--:|--:|
+| denoise, kernels/step (`denoise_kernels.py`) | 234.90 | **234.90** | 234.90 | 234.90 |
+| … of which stream 157 | 171.00 | **171.00** | 171.00 | 171.00 |
+| **prefix, stream 7, kernels/predict** | 1018.00 | **1018.00** | 1024.00 | 1024.00 |
+| stream 158, kernels/step | 35.60 | 35.60 | 35.60 | 35.60 |
+| total kernels/predict | 3084 | **3084** | 3090 | 3090 |
+| stream 7 GPU busy, µs/predict | 23863.9 | 23914.9 (+0.21 %) | 23771.8 | 24033.6 (+1.10 %) |
+| stream 157 GPU busy, µs/step | 11366.1 | 11398.6 (+0.29 %) | 11358.4 | 11357.2 |
+
+The per-kernel-category count tables (`tools/ksum.py`, category × count × distinct
+names) are **byte-identical pre vs post** on streams 7, 157 and 158 for *both* arms.
+The busy-time deltas are run-to-run noise — note the reference arm, which did not
+change at all, moved 5× more than ours.
+
+Stream 157 still shows `_swiglu_mm_kernel` 180.00/step and `_qkv_rope_kernel`
+180.00/step, i.e. both fusions are live on the expert through the vendored module.
+Inductor names the wrapper kernel after the op *name*, not the namespace, so
+`triton_per_fused__to_copy_add_gate_up_swiglu_mean_mul_pow_rsqrt` is unchanged and the
+counts remain directly comparable with the pre-change profiles.
+
+The only kernel-count differences anywhere are the 6 per-predict RL-bookkeeping
+kernels between `pi05_infer` and RLinf that §6 already documented (`reduce_kernel` −1,
+`index_elementwise_kernel` −1, −4 across the `torch.stack` copies) — identical before
+and after this change.
+
+The caveat in §6 about "238 kernels/step" is unaffected: all four profiles measure
+234.90 with `tools/denoise_kernels.py`, including the two RLinf arms, so the gap
+remains a counting-definition difference rather than a regression.
+
