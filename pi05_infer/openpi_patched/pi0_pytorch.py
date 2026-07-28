@@ -256,8 +256,22 @@ class PI0Pytorch(nn.Module):
 
         return embs, pad_masks, att_masks
 
-    def embed_suffix(self, state, noisy_actions, timestep):
-        """Embed state, noisy_actions, timestep to prepare for Expert Gemma processing."""
+    def embed_suffix(self, state, noisy_actions, timestep, skip_adarms_cond: bool = False):
+        """Embed state, noisy_actions, timestep to prepare for Expert Gemma processing.
+
+        Args:
+            skip_adarms_cond: pi05 only. When the caller already has the precomputed adaRMS
+                modulation (``adarms_mod``), the returned ``adarms_cond`` is dead -- the
+                consumer in ``modeling_gemma`` prefers ``adarms_mod`` and never falls through
+                to the ``dense(cond)`` branch. On pi05 the timestep embedding feeds *nothing*
+                else (``action_time_emb`` is just ``action_emb``), so the whole sinusoid +
+                two-layer time MLP can be skipped and ``adarms_cond`` returned as ``None``.
+                Defaults to ``False``, i.e. today's behaviour: every caller that does not pass
+                ``adarms_mod`` still gets a fully computed ``cond``.
+
+                This is a plain Python flag resolved at trace time (never a test on a device
+                tensor), so ``embed_suffix`` stays safe to run inside a captured CUDA graph.
+        """
         embs = []
         pad_masks = []
         att_masks = []
@@ -282,11 +296,18 @@ class PI0Pytorch(nn.Module):
             # Set attention masks so that image and language inputs do not attend to state or actions
             att_masks += [1]
 
+        # On pi05 the timestep embedding exists *only* to build ``adarms_cond``; when the caller
+        # opts out of it (it supplies ``adarms_mod`` instead) the sinusoid and the time MLP are
+        # pure dead work. On non-pi05 the embedding is concatenated into the action tokens, so it
+        # is always needed there.
+        skip_time_emb = self.pi05 and skip_adarms_cond
+
         # Embed timestep using sine-cosine positional encoding with sensitivity in the range [0, 1]
-        time_emb = create_sinusoidal_pos_embedding(
-            timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0, device=timestep.device
-        )
-        time_emb = time_emb.type(dtype=timestep.dtype)
+        if not skip_time_emb:
+            time_emb = create_sinusoidal_pos_embedding(
+                timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0, device=timestep.device
+            )
+            time_emb = time_emb.type(dtype=timestep.dtype)
 
         # Fuse timestep + action information using an MLP
         def action_proj_func(noisy_actions):
@@ -305,6 +326,10 @@ class PI0Pytorch(nn.Module):
                 return self.action_time_mlp_out(x)
 
             action_time_emb = self._apply_checkpoint(mlp_func, action_time_emb)
+            adarms_cond = None
+        elif skip_time_emb:
+            # Caller supplies adarms_mod: the time MLP output would be discarded downstream.
+            action_time_emb = action_emb
             adarms_cond = None
         else:
             # time MLP (for adaRMS)

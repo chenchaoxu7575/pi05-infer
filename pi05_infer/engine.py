@@ -73,6 +73,12 @@ from pi05_infer.openpi_patched.pi0_pytorch import (  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+# Kill switch for the dead-``adarms_cond`` elision in ``get_suffix_out`` (see there).
+# Default on; set ``RLINF_SKIP_DEAD_ADARMS_COND=0`` to restore the old behaviour, i.e.
+# compute the timestep conditioning on every denoise step even though nothing reads it.
+# Read once at import so the branch is a Python constant during CUDA-graph capture.
+_SKIP_DEAD_ADARMS_COND = os.environ.get("RLINF_SKIP_DEAD_ADARMS_COND", "1") != "0"
+
 
 def _to_numpy(x):
     return np.asarray(x.detach().cpu()) if torch.is_tensor(x) else x
@@ -443,7 +449,7 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
             )  # [B, n_norm, 3072]
         return torch.stack(rows, dim=0).contiguous()  # [num_steps, B, n_norm, 3072]
 
-    def embed_suffix(self, state, noisy_actions, timestep):
+    def embed_suffix(self, state, noisy_actions, timestep, skip_adarms_cond: bool = False):
         """CUDA-graph-safe wrapper around the parent ``embed_suffix``.
 
         The parent builds the suffix attention-mask via ``torch.tensor(<python list>)``
@@ -455,6 +461,9 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
         batch size that follows on the parent side is a view op and is capture-safe.
 
         Numerically identical to the parent: the cached tensor holds the exact same values.
+
+        ``skip_adarms_cond`` is forwarded verbatim (see the parent): it drops the dead
+        timestep-conditioning computation when the caller already holds ``adarms_mod``.
         """
         orig_tensor = torch.tensor
 
@@ -468,7 +477,9 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
 
         torch.tensor = _tensor_shim
         try:
-            return super().embed_suffix(state, noisy_actions, timestep)
+            return super().embed_suffix(
+                state, noisy_actions, timestep, skip_adarms_cond=skip_adarms_cond
+            )
         finally:
             torch.tensor = orig_tensor
 
@@ -529,8 +540,15 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
     ):
         """Apply one denoising step of the noise `x_t` at a given timestep."""
         with nvtx_range("denoise/embed_suffix", color="yellow"):
+            # When ``adarms_mod`` is in hand (the precomputed modulation table -- the normal
+            # denoise path) the expert never consults ``adarms_cond``: modeling_gemma takes the
+            # ``adarms_mod`` branch and the ``dense(cond)`` fallback below it never runs. Tell
+            # embed_suffix to skip building it -- that removes the sinusoid (cos/sin) plus the
+            # two 1024x1024 time-MLP GEMMs and their two silus from every denoise step.
+            # Python-level, so the captured graph traces exactly one of the two shapes.
+            skip_cond = _SKIP_DEAD_ADARMS_COND and adarms_mod is not None
             suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = (
-                self.embed_suffix(state, x_t, timestep)
+                self.embed_suffix(state, x_t, timestep, skip_adarms_cond=skip_cond)
             )
 
         with nvtx_range("denoise/suffix_mask_prep", color="white"):

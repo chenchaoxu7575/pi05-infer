@@ -98,16 +98,18 @@ class GemmaRMSNorm(nn.Module):
         dtype = x.dtype  # original dtype, could be half-precision
         normed_inputs = self._norm(x)
         
-        if cond is None or self.dense is None:
+        if self.dense is None or (cond is None and mod is None):
             # regular RMSNorm
             # scale by learned parameter in float32 (matches source implementation)
             normed_inputs = normed_inputs * (1.0 + self.weight.float())
             return normed_inputs.to(dtype), None  # return in original dtype with None gate
-        
-        # adaptive RMSNorm (if cond is provided and dense layer exists)
-        if cond.shape[-1] != self.cond_dim:
+
+        # adaptive RMSNorm: driven either by a precomputed `mod` or by `cond` via self.dense.
+        # `mod` alone is enough -- callers that supply it (the precomputed modulation table) may
+        # legitimately pass cond=None, since the timestep conditioning would be dead work.
+        if cond is not None and cond.shape[-1] != self.cond_dim:
             raise ValueError(f"Expected cond dimension {self.cond_dim}, got {cond.shape[-1]}")
-        
+
         #self.dense.to(dtype=torch.bfloat16).to(dtype=torch.float32)
         # adaRMS projection: consume precomputed batched-GEMM slice `mod` when provided
         # (all per-norm dense(cond) projections coalesced into one GEMM upstream),
