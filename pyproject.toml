@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pi05-infer"
+version = "0.1.0"
+description = "Standalone pi0.5 / pi0 bs=1 inference path extracted from RLinf"
+requires-python = ">=3.10,<3.12"
+# Runtime deps (torch, openpi, transformers, einops, numpy, typing_extensions) are
+# intentionally NOT declared: this package is installed with `pip install -e --no-deps`
+# into an existing openpi environment whose torch/transformers builds must not be
+# touched. See README.md.
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["pi05_infer*"]
+
+# NOTE: pi05_infer/gemma/ and pi05_infer/openpi_patched/ deliberately have no
+# __init__.py, so setuptools does not treat them as packages and they cannot be
+# imported by accident. They are version-controlled rescue copies of files that
+# currently live in the container's site-packages (Stage 0); wiring the package to
+# use them instead of site-packages is Stage 2 and has NOT been done.
+
+[tool.ruff]
+line-length = 90
+exclude = ["_extract_src", "pi05_infer/gemma", "pi05_infer/openpi_patched"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# vendored verbatim from claude_mem/.../kernel_fusion/scripts/bitgate.py
+"tools/bitgate.py" = ["E741"]
