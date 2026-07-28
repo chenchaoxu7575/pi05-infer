@@ -246,9 +246,14 @@ But the captured expert forward reads `self.kv_static_k`, and touches `past_key_
 for an `is not None` test, so nothing ever reads what that copy wrote; `prime_kv_static`
 (line 336, which runs *before* the refresh) is what actually supplies the fresh prefix. A
 prior session measured this transfer at sub-0.1 ms, so the upside is small and deleting it
-would have to be re-validated against the graph capture. The benchmark does not call
-`capture_cuda_graph`, so this path is not exercised by `bench/standalone_infer_bench.py` and
-does not appear in the profile above.
+would have to be re-validated against the graph capture.
+
+**Updated 2026-07-28:** `bench/standalone_infer_bench.py --stage1` now *does* call
+`capture_cuda_graph`, so this path is exercised and appears in
+`20260728_stage1_pi05infer_pro5k/stage1_on.nsys-rep`. The dead-copy observation stands and
+is still not acted on; the measured Stage-1 win (−0.93 ms/predict paired) is large enough
+that a sub-0.1 ms follow-up is not worth risking the capture over. See README
+"Measured 2026-07-28, `--stage1`".
 
 ## 7. Not done (out of scope for this task)
 

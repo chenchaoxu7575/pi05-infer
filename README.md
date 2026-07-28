@@ -147,7 +147,34 @@ docker exec -w /workspace/rlinf_pub/pi05-infer pi05bench \
 ... --phases
 # dump actions for a numerical A/B, and record SM clock / power in the timed window
 ... --dump-actions /tmp/a.pt --clocks-json /tmp/clocks.json
+# Stage 1: hand-captured denoise CUDA graph (opt-in, see below)
+... --stage1
 ```
+
+### `--stage1` — the hand-captured denoise CUDA graph
+
+`--stage1` captures **one complete flow_ode denoise step** (expert forward + value +
+Euler + logprob) into a `torch.cuda.CUDAGraph` and replays it for every step, so one
+replay replaces the expert-only inductor cudagraph *plus* all the eager glue between
+launches. It is **opt-in**; the default path is unchanged so existing measurements
+stay reproducible.
+
+Two things the flag handles for you, both of which are load-bearing:
+
+* It rewrites `--compile-mode max-autotune` to `max-autotune-no-cudagraphs`. Inductor's
+  own cudagraphs cannot be nested inside a hand-captured one; the failure mode is
+  `RuntimeError: accessing tensor output of CUDAGraphs that has been overwritten`.
+  `capture_cuda_graph` rejects the cudagraph-emitting modes outright.
+* It asserts `is_cuda_graph_enabled()` **and** `_denoise_graph_captured` after warmup.
+  The `CUDAGraph` is captured lazily, on the first eval-shaped `sample_actions`, so a
+  shape-signature mismatch would otherwise fall back to the eager loop with no symptom
+  other than the runtime. That silent fallback is exactly how this flag came to be
+  missing from the package in the first place.
+
+The adaRMS modulation table is built *before* capture (it runs capture-illegal eager
+ops) and the per-step index into it is a device gather, so both survive capture; the
+captured signature is printed, e.g.
+`((1, 50, 32), torch.float32, (1, 32), (1, 968), 10)`.
 
 **The GPU is shared and power-capped at 300 W.** Check `pgrep -f
 "run_stage1|standalone_infer"` before timing, never run two timing jobs at once (a
@@ -176,6 +203,13 @@ python -c "import torch;a=torch.load('/tmp/ref.pt');b=torch.load('/tmp/new.pt');
 #    sqlite with the same 2026 binary)
 bash tools/prof.sh nsys_pi05infer pi05infer 12    # this package
 bash tools/prof.sh nsys_rlinf     rlinf     12    # the reference arm
+bash tools/prof.sh nsys_stage1    stage1    12    # this package + --stage1
+
+# 3b. Stage-1 paired A/B (4 alternating rounds x 30 iters) and per-step GPU idle
+bash tools/ab_stage1.sh 4 30
+/opt/venv/openpi/bin/python tools/ab_stage1_summary.py \
+    /workspace/rlinf_pub/pi05_infer_runs/ab_stage1
+/opt/venv/openpi/bin/python tools/step_idle.py <off.sqlite> <on.sqlite>
 
 # 4. per-stream rollup (prefix = stream 7, denoise cudagraph = stream 157) and
 #    kernels per denoise step
@@ -267,6 +301,79 @@ Caveat on the historical **238 kernels/step**: `tools/denoise_kernels.py` measur
 the trailing eager glue of the final denoise step; widening it spills into the next
 predict's prefix. The 3-kernel gap is a definitional difference, not a regression —
 arm A, i.e. the code that produced the 238 figure, measures 234.90 with this tool too.
+
+### Measured 2026-07-28, `--stage1` (hand-captured denoise CUDA graph)
+
+Same box and harness. The Stage-1 machinery came across with the extraction but
+nothing called it, so every number above was measured with the *eager* denoise loop.
+
+**Paired A/B**, 4 alternating rounds, separate processes (the arms need different
+compile modes), 30 iterations after 8 warmup calls, serialized, plain wall clock
+(`tools/ab_stage1.sh 4 30` → `tools/ab_stage1_summary.py`):
+
+| round | off (max-autotune) | on (`--stage1`) | Δ | SM clock off / on | W off / on |
+|---|--:|--:|--:|---|---|
+| 1 | 44.16 ms | **43.07 ms** | −1.09 | 2428 / 2430 MHz | 216.3 / 215.9 |
+| 2 | 44.28 | **43.30** | −0.98 | 2438 / 2432 | 211.9 / 209.8 |
+| 3 | 43.50 | **43.09** | −0.41 | 2433 / 2423 | 219.1 / 217.5 |
+| 4 | 44.41 | **43.16** | −1.25 | 2448 / 2430 | 208.7 / 210.0 |
+| **grand mean** | **44.08 ms** | **43.16 ms** | **−0.93 ms** (sd 0.36, n=4) | | |
+
+Every round is negative and the two arms of a round sit within ~20 MHz of each other,
+so the effect is larger than the clock drift the pairing is there to cancel. 43.16 ms
+is **below the 43.74 ms RLinf all-fusions + Stage-1 reference**.
+
+**Per-denoise-step GPU idle** (`tools/step_idle.py`, both profiles shot back to back
+with identical flags; anchor `_qkv_rope_kernel`, 18×/step, 108 predict-internal steps):
+
+| build | step wall | busy | idle | idle % |
+|---|--:|--:|--:|--:|
+| `--stage1` **off** | 1390.0 µs | 1247.8 | 142.2 | 10.2 % |
+| `--stage1` **on** | **1294.2 µs** | 1233.7 | **60.5 µs** | **4.7 %** |
+
+−95.8 µs/step × 10 steps = **−0.96 ms/predict**, which accounts for the −0.93 ms
+paired wall-clock delta on its own. Total GPU busy per predict is flat (40.32 → 40.26
+ms), i.e. the win is pure launch-gap removal, and the collateral cost of dropping
+`vision_tower`'s inductor cudagraph (unavoidable: `--stage1` switches the whole build
+to `-no-cudagraphs`) is ≈ +0.08 ms of prefix busy — inside the noise.
+
+**How to tell the graph is actually live.** `graphNodeId` is *not* a discriminator:
+with Stage 1 off, all 2160 denoise kernels already carry one, because inductor emits
+its own cudagraph. The reliable signals are:
+
+| signal | off | on |
+|---|---|---|
+| `denoise/expert_forward` NVTX ranges | 10 / predict | **0** (body is inside the graph) |
+| distinct `graphId`s | 2 (expert 20520 kern + vision 4272) | **1** (28560 kern) |
+| kernels/step on stream 157 | 171 | **238** |
+| `_denoise_graph_captured` asserted by the bench | n/a | True |
+
+238 kernels/step is exactly the historical shipped-build figure — the whole step body,
+not just the expert block, is now one graph node set.
+
+**Bit-exactness**, fixed seed, `[1,50,6]` compared in float64:
+
+| check | result |
+|---|---|
+| `--stage1` on vs off | **bitwise equal, `max\|Δ\| = 0.00e+00`** |
+| `--stage1` on vs the RLinf reference path | **bitwise equal, `max\|Δ\| = 0.00e+00`** |
+| `--stage1` off vs the RLinf reference path | bitwise equal, `max\|Δ\| = 0.00e+00` |
+
+Lossless as designed: `flow_ode` has `x_t_std == 0`, so the Euler update captured in
+the graph (`x_t_next = x_t_mean`) is algebraically the eager `x_t_mean + noise * 0`,
+and the eager `sample_noise` draw is kept outside the graph so global RNG consumption
+is unchanged.
+
+Profiles: `claude_mem/pi05_rollout_forward/20260728_stage1_pi05infer_pro5k/`
+(`stage1_on.nsys-rep`, `stage1_off.nsys-rep`, + sqlite exports, the A/B logs and the
+two tool outputs).
+
+⚠️ One caveat on comparing against older idle numbers: the 2026-07-28 pre-Stage-1
+profile (`pi05_infer_runs/nsys_pi05infer.sqlite`) measures 1461.4 µs wall / 214.7 µs
+idle with this same tool, versus 1390.0 / 142.2 for today's off arm — at **identical**
+GPU busy (1246.7 vs 1247.8 µs/step). The 72 µs/step difference is host-side stall in
+that older capture, not a code change. Only compare idle figures from profiles shot in
+the same session.
 
 ## Not done
 
