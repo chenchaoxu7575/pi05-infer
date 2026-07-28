@@ -3,15 +3,21 @@
 **π0.5 动作专家(action expert)的独立 bs=1 推理引擎**,从 [RLinf](https://github.com/RLinf/RLinf)
 里抽出来,针对 **RTX PRO 5000(GB202 / sm_120,Blackwell)** 做过一轮系统性优化。
 
-端到端 `predict_action_batch`:**52.60 ms → 42.90 ms(−9.70 ms,−18.4 %)**。
+端到端 `predict_action_batch`:**52.60 ms → 42.90 ms(−9.70 ms,−18.4 %)**,
+基线是 `torch.compile max-autotune`。
 
 **每一项优化都是位级一致的**(bit-exact,`max|Δ| = 0.00e+00`,固定 seed 与未优化路径对拍)。
 没有量化、没有降精度、没有改采样器、没有减少去噪步数 —— 模型输出逐比特不变。
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/ledger_dark.png">
-  <img alt="优化台账:52.60 ms 到 42.90 ms 的瀑布图" src="docs/ledger_light.png">
+  <img alt="优化台账:上半是 2026-07-03 的前史(另一把尺),下半是 52.60 到 42.90 ms 的配对瀑布图" src="docs/ledger_light.png">
 </picture>
+
+图分两半,是刻意的:**下半**是本仓库的台账,每一行一次配对 A/B、同一把尺(独立 bench 的
+plain wall clock);**上半**是它的前史,测于**完整 RLinf worker + nsys** 的另一套口径 ——
+`torch.compile` 本身就值 4.1×(270.6 → 65.8 ms),但 **58.9 → 52.60 的那 6 ms 是换尺子,
+不是优化**。两半不能相加成一条加速链,细节见下面「台账之前:前史」一节。
 
 ---
 
@@ -43,6 +49,34 @@ checkpoint `RLinf-Pi05-LIBERO-SFT`,torch 2.7.1+cu128,nsys 2026.1.2。
 合并 GEMM、消拷贝)没有一行手写 Triton;而第三段每 0.1 ms 都要付出一个手写 kernel 的代价。
 同样重要的是,前两段已经把便宜的收益吃干净了 —— 所以第三段现在是真正的前沿,
 也确实**还没有产出**。
+
+### 台账之前:前史(2026-07-03,**另一把尺**)
+
+52.60 ms 不是"完全没优化"的起点。它之前还有一段,但那一段是在**完整 RLinf Ray + EnvWorker
+链路 + nsys** 下测的,机器也是另一台(`10.172.160.142`,4× RTX PRO 5000),e2e 的定义是
+"predict 各段 CPU 墙钟之和"。**它和下面的台账不是同一把尺,不能相减、不能接成一条链。**
+
+| # | 配置 | e2e | vs E0 |
+|---|---|--:|--:|
+| — | eager,不编译 | 270.6 ms | — |
+| **E0** | **naive `torch.compile`(max-autotune,RLinf #968)** | **65.8 ms** | 基线 |
+| E1 | ＋ `RLINF_DISABLE_OPENPI_TYPECHECK=1` | 63.0 | −2.8 |
+| E2 | ＋ `RLINF_SIGLIP_BATCHED=1`(3 视角 → 一次 ViT) | 61.7 | −4.1 |
+| E3 | 三项全开 | **58.9** | **−6.9(−10.5 %)** |
+
+**编译器本身值 4.1×**(270.6 → 65.8),是全程最大的单一杠杆,而且它不是这个仓库做的 ——
+所以本仓库把"naive 的 `torch.compile`"当成真正的起点来看待,而不是把 270.6 拿来算加速比。
+
+⚠️ **E1 和 E2 是 E0 的两个单因子臂,不是累加链。** E2 那一行的 typecheck 仍然是**开**的,
+所以 −4.1 是"相对 E0",不是"在 E1 的 63.0 上再减 4.1"。三项正交可叠,合起来才是 E3 的 −6.9。
+
+⚠️ **58.9 → 52.60 的那 ~6 ms 不是优化,是换尺子。** 上游记录写得很直白:"纯推理基线(同上
+配置)53.1 ms —— 换测法:去掉 Ray/worker 口径约 6ms",并且专门警告"**两种测法别相减**"。
+两边跑的是**同一份 compile 配置**(max-autotune / #968);独立推理脚本本来就默认内置了
+typecheck no-op 与 SigLIP 合批,所以 **52.60 就是 E3 的配置在另一把尺上重测**的结果。
+同期在 pro5k 上留下的读数是 52.1(plain)/ 53.3(nsys)/ 53.12 / 52.60,彼此的散布落在
+本机 ±0.7 ms 的 rebuild variance 之内。这条换尺从来没有做过配对 A/B —— 那台 `.142` 后来
+就没再连上,所以那 6 ms 是**归因的,不是测出来的**。
 
 ### 优化台账
 
@@ -86,11 +120,64 @@ e2e = `predict_action_batch`,plain wall clock(**不是** nsys 的 wall time),
 | adaRMS 投影 `triton_per_fused_addmm_0` | 300 instances,395 µs/step,DRAM-read 87 % | **0 instances** | ① |
 | prefix KV 的 `cat` kernel | 88 µs/step(物理下限 27) | **0** | ① |
 | timestep conditioning(正弦 + time MLP) | 21 kernel/step,47.3 µs/step | **0** | ① |
-| denoise kernels/step | 305 | **217**(−29 %) | ①② |
-| denoise µs/step | 1368.0 | **1185.0**(−13.4 %) | ①② |
+| denoise kernels/step | 347 | **217**(−37 %) | ①② |
+| denoise µs/step(GPU busy) | 2025.6 | **1185.0**(−41.5 %) | ①② |
 | k/v_proj 的 launch grid | **8**(110 个 SM 里只有 8 个在忙) | 80(融合后的 QKV GEMM) | ② |
 | `_swiglu_mm_kernel` 达成带宽 | — | **967 GB/s** | ② |
 | `down_proj` 达成带宽 | 557 GB/s | **557 GB/s(未动)** | ③ |
+
+### 换一个纵轴:去噪单步的台账
+
+同一批优化,按**一个去噪步**来记账。因为整个 predict 里能动的就是这 10 步,
+所以这张台账比 e2e 更能说明"改了什么"。
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/denoise_ledger_dark.png">
+  <img alt="去噪单步台账:GPU busy 2025.6 → 1185.0 µs/step" src="docs/denoise_ledger_light.png">
+</picture>
+
+口径:**GPU busy per denoise step** = 去噪循环里 kernel 区间的并集 ÷ 10 步。bs=1 下没有任何
+重叠,所以它等于逐核时长求和 —— 这正是后面几行 nsys stream-157 的算法,两套工具因此同尺。
+
+| # | 优化 | µs/step | Δ | kernels/step |
+|---|---|--:|--:|--:|
+| 0 | baseline(adaRMS 预算表之前) | 2025.6 | — | 347 |
+| 1 | ＋ adaRMS 调制预算表 | 1620.9 | **−404.7** | 346 |
+| 2 | ＋ fused QKV / static KV / att_masks 上设备(＋ Stage-1 图) | 1368.0 | −252.9 ※ | 305 |
+| 3 | ＋ SwiGLU / QKV+RoPE 两个 epilogue 融合 | 1236.0 | **−132.0** | 238 |
+| 4 | ＋ 去掉死的 timestep conditioning(当前) | **1185.0** | −51.0 ◆ | **217** |
+| | **总计** | | **−840.6(−41.5 %)** | **−130** |
+
+※ 第 2 行是**跨 session 的四项合并**,不是配对 A/B。而且要注意:**Stage-1 图在 GPU busy
+口径下并不省时间** —— 它把 idle 变成 busy(每 predict idle 3.74 → 0.93 ms),收益体现在
+墙钟而不是这一列。第 1 行(同一张表、同一 session)和第 3 行(`RESULTS_fusion.md` 明确记
+`−132.0(−9.6 %)`)才是干净的配对。
+
+◆ 第 4 行自己的配对基线是**同 session** 的 1232.3 µs/step(`prof_skip0`),即 **−47.3**;
+链上口径是 −51.0。同一份 238 核 build 在 07-28 重测还给出 1232.6(逐核普查)与 1233.3
+(union),三个数是同一个 build 的不同工具/窗口,**不是一级台阶**。
+
+更早的一段用的是**墙钟**口径(NVTX `denoise/loop` span ÷ 10,含 launch gap 与每步 CPU):
+2026-07-09 的基线是 **2255 µs/step**(同一份 profile 的 busy 是 2189),adaRMS 预算表那次
+配对的 sync-timed 墙钟是 **2286 → 1881**。这把尺和上表不能相接;今天两把尺的读数是
+**1242.7(wall)vs 1185.0(busy)**,每步还剩 57.7 µs 的 GPU idle。
+
+> **有一个数我没有画进图**:最早记录的 "2115 µs/step @ 417 kernels"。它出处的 sqlite 已经
+> 不在笔记树里,而且 2.115 ms 在同期另一份 profile 里恰好是 `denoise/expert_forward` 的
+> span(那份的 `denoise/loop` 是 2.255),所以它很可能是 **expert-only 的更窄口径**,与其它
+> 行不同尺。与其猜一个口径,不如不画。
+
+参考实现在**同一把尺**上的位置(详见"与参考实现的对比"一节的限定):
+
+| | denoise µs/step | kernels/step |
+|---|--:|--:|
+| `dexmal/realtime-vla` @`b86a942` | **1191.0**(sd 13.2) | **165** |
+| `limxdynamics/FluxVLA` @`7f9f774` | 1419.0 | ~205 |
+| 我们(当前) | **1185.0** | 217 |
+
+⚠️ 1185.0 与 1191.0 **不是配对测量**(相隔一天、不同 build)。realtime-vla 那次做过配对的
+对手是我们当天的 **1368.7 µs/step @ 306 核**,他们领先 1.15×。**不能**据此宣称反超。
+FluxVLA 那一行的 chunk 是 10 而不是 50 —— 后缀 action token 少 5 倍,也不是同一个 workload。
 
 ---
 
@@ -454,10 +541,33 @@ rotary 表的 `cos`/`sin`、`_get_timesteps` 的 `linspace` —— 这些在 10 
 不同 build,差值(0.51 ms)小于本机记录在案的 ±0.7 ms rebuild variance。**不能**据此
 宣称超越。把 realtime-vla 当作同水位的 peer 看待即可。
 
-⚠️ [`limxdynamics/FluxVLA`](https://github.com/limxdynamics/FluxVLA) 是**另一个**仓库
-(kernel 同名是因为 FluxVLA 重新实现了一遍)。早期笔记把两者混为一谈,由此得出的
-"他们每步重算 adaRMS"、"44.89 ms 打平"两条结论**不适用于** realtime-vla —— 后者在
-`Pi05Inference.__init__` 里就把 37 × 10 个 adaRMS 投影预计算完了,和我们一样。
+### 另一个参考实现:`limxdynamics/FluxVLA`
+
+[`limxdynamics/FluxVLA`](https://github.com/limxdynamics/FluxVLA)(@`7f9f774`)是**另一个
+仓库**,不是 realtime-vla —— kernel 同名只是因为 FluxVLA 把 realtime-vla 的 Triton 核重新
+实现了一遍,**行为并不相同**。在同一张卡、他们真实的 LIBERO-10 π0.5 权重下实测:
+
+| | FluxVLA @ 968 token | FluxVLA @ 560 token(他们的默认) |
+|---|--:|--:|
+| e2e | **44.9 ms/predict** | 31.1 ms |
+| denoise | 1419.0 µs/step(union-busy;marker 口径 1404) | — |
+| kernels / denoise step | ~205 | — |
+
+⚠️ **那个 31.1 ms 绝对不能拿来和我们的数比。** 它是 2 视角 + 48 语言 token 的**更轻**配置,
+和 968 token 差的那 ~14 ms 纯粹是 workload,不是优化。
+
+⚠️ **44.9 ms 这个数,曾经有一条结论被撤回,必须说清撤的是哪一部分。** 被撤回的是它的
+**归属和判词**,不是这次测量本身:当时它被记成"**他们(= realtime-vla)的代码跑在我们的
+配置下 = 44.89 ms,打平**",而实际上跑的是 **FluxVLA 这个不同的仓库**,并且那份 LIBERO
+配置的 `n_action_steps=10`,即 **chunk 10 而不是 50**。所以"dead heat"这个判词、以及由它
+派生的"他们每步重算 adaRMS 所以我们有优势"一条,都已作废 —— realtime-vla 在
+`Pi05Inference.__init__` 里就把 37 × 10 个 adaRMS 投影预计算完了,和我们一样,是**平手**
+而不是优势。作为"FluxVLA 在 968 token 下的一次实测",44.9 ms 仍然成立。
+
+所以本仓库**不把 FluxVLA 当作 e2e 的正面对手**:它和我们的配置在两个方向上都没对齐 ——
+chunk 10(比我们轻)、他们的计时器跳过我们含在里面的 ~2–3 ms CPU 预处理(也比我们轻),
+而他们的实现每步重算 adaRMS 与 time MLP、每次调用还有一次 `.item()` device sync(比我们重)。
+图里的 FluxVLA 线因此画成灰色虚线并标注 "NOT config-matched",只当参考点看,不做胜负判断。
 
 ---
 
@@ -621,7 +731,7 @@ tools/
   ab_rlinf_reference.py / ab_stage1.sh / ab_stage1_summary.py   配对 A/B 驱动
   step_idle.py / stream_summary.py / denoise_kernels.py / ksum.py / prof.sh   profile 分析
 docs/
-  make_charts.py       重新生成本 README 的三张图(含从 sqlite 重新推导)
+  make_charts.py       重新生成本 README 的四张图(含从 sqlite 重新推导)
   MEASUREMENTS.md      完整测量记录
 _extract_src/          抽取前的 RLinf 原始文件(未重构)
 ```

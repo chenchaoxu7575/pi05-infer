@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
-"""Regenerate the three README charts (light + dark PNG for each).
+"""Regenerate the four README charts (light + dark PNG for each).
 
     python docs/make_charts.py [--sqlite <stage1_on.sqlite> --sqlite-off <stage1_off.sqlite>]
 
 Every number plotted here is a measurement, and every measurement has a source:
 
-* the **ledger** (chart 1) is a chain of paired plain-wall-clock A/Bs, one per
-  optimization, each recorded in its own results note.  It is hard-coded below
-  with the note it came from, because those runs cannot be replayed from a
-  profile.
-* the **denoise kernel breakdown** (chart 2) and the **phase split** (chart 3)
+* the **e2e ledger** (chart 1) is a chain of paired plain-wall-clock A/Bs, one
+  per optimization, each recorded in its own results note.  It is hard-coded
+  below with the note it came from, because those runs cannot be replayed from
+  a profile.  Its upper panel is the *prehistory* of that ledger -- older runs
+  taken on a **different measurement harness**, kept visually separate on
+  purpose (see PREHISTORY below).
+* the **denoise ledger** (chart 2) is the same idea on us/denoise-step.  It too
+  is split into two panels because the early numbers use a different ruler
+  (NVTX wall clock per step) from the later ones (nsys stream-157 GPU busy).
+* the **denoise kernel breakdown** (chart 3) and the **phase split** (chart 4)
   are derived from nsys 2026.1.2 sqlite exports.  Pass ``--sqlite`` /
   ``--sqlite-off`` to re-derive them instead of using the recorded values; the
   script prints what it derived so it can be diffed against the constants.
+
+Source notes live in ``claude_mem/pi05_rollout_forward/`` (not shipped in this
+repo); every hard-coded constant below carries its file:line.
 
 Design follows a validated categorical palette (blue / orange / aqua) that
 passes CVD separation, normal-vision separation and lightness-band checks in
@@ -191,71 +199,397 @@ LEDGER = [
      "20260728_adarms_cond/ab_summary.txt (paired 43.20 -> 42.90, sd 0.07, n=4)"),
 ]
 
+# --- prehistory: the runs that came *before* the ledger above -----------------
+# ALL of these were taken on a DIFFERENT measurement harness: the full RLinf
+# Ray + EnvWorker training path with nsys attached, on a different box
+# (10.172.160.142, 4x RTX PRO 5000), 2026-07-03, nsys 2025.3.1.  e2e there is
+# "the sum of the per-phase CPU wall clocks under nsys"
+# (claude_mem/pi05_rollout_forward/nsys_sm120/README.md:104), NOT the plain
+# standalone wall clock the ledger above uses.
+#
+# The step from 58.9 to the 52.60 ledger baseline is therefore NOT an
+# optimization.  It is explicitly documented as a change of ruler:
+#   opt_validation/OPTIMIZATION_LOG.md:12  "纯推理基线(同上配置) | 53.1 ms |
+#       换测法:去掉 Ray/worker 口径约 6ms | 纯推理"
+#   opt_validation/OPTIMIZATION_LOG.md:16-17  "两种测法别相减 ... 两者差约 6ms
+#       是测法口径,不是优化"  ("do not subtract the two rulers ... the ~6 ms
+#       difference is measurement scope, not an optimization")
+#   HANDOFF_min_infer_repro.md:13  "142 的 58.9 是 full-worker + nsys 口径"
+# Both sides run the *same* compile config (torch.compile max-autotune, RLinf
+# PR #968); PROFILES_INDEX.md:343 labels the E-series rep "#968 max-autotune".
+#
+# E1 and E2 are single-factor arms off E0, NOT a cumulative chain: E2 has
+# typecheck still ON (nsys_sm120/README.md:96-102, column "typecheck关").
+# Deltas below are therefore all "vs E0".
+#
+# (label, e2e_ms, delta_vs_E0, source)
+PREHISTORY = [
+    ("eager - no torch.compile", 270.6, None,
+     "PROFILES_INDEX.md:348 (opt_eager/)"),
+    ("naive torch.compile: max-autotune (RLinf #968)", 65.8, None,
+     "PROFILES_INDEX.md:349 (opt_E0/) - the prehistory baseline"),
+    ("E1: openpi typecheck off        (single factor)", 63.0, -2.8,
+     "PROFILES_INDEX.md:350 (opt_E1/)"),
+    ("E2: SigLIP 3-view batching      (single factor)", 61.7, -4.1,
+     "PROFILES_INDEX.md:351 (opt_E2/)"),
+    ("E3: both, on top of compile", 58.9, -6.9,
+     "PROFILES_INDEX.md:352 (opt_E3/) - -10.5% vs E0"),
+]
 # dexmal/realtime-vla @ b86a942, our config, our GPU, same day, real (non-zero)
-# weights, our e2e scope.  HEADTOHEAD_realtime_vla_pro5k.md sec.2.
+# weights, our e2e scope.  HEADTOHEAD_realtime_vla_pro5k.md:473 (scope B, n=30,
+# sd 0.20).  The only *paired* head-to-head we have is that same line: theirs
+# 43.41 vs ours-that-day 44.55, i.e. theirs faster by 1.14 ms.
 PEER_MS = 43.41
-PEER_LABEL = "dexmal/realtime-vla, matched config: 43.41 ms"
+# limxdynamics/FluxVLA @ 7f9f774 - a DIFFERENT repo from dexmal/realtime-vla.
+# opt_validation/fluxvla_baseline.md:20 - 44.9 ms/predict at 968 prefix tokens
+# (their own default is a lighter 560-token config that runs 31.1 ms; that one
+# must never be compared against our 968-token numbers).
+# NOT config-matched to us, in both directions:
+#   - chunk 10, not 50 (HEADTOHEAD_realtime_vla_pro5k.md:456) -> cheaper for them
+#   - their timer skips the CPU preprocessing ours includes, ~2-3 ms
+#     (opt_validation/fluxvla_baseline.md:10-11)        -> cheaper for them
+#   - their loop recomputes adaRMS + the time MLP every step and does a device
+#     sync per call (HEADTOHEAD_realtime_vla_pro5k.md:451-455) -> costlier
+# PROFILES_INDEX.md:437-441 retracts the old "their code at our config =
+# 44.89 ms, dead heat" reading of this run: what was retracted is the
+# *attribution* (wrong repo) and the "dead heat" verdict, not the measurement.
+FLUX_MS = 44.9
+
+
+def _peer_key(ax, t, x, y, color, ls, title, sub, dash=0.30, pad=0.42, dy=0.30):
+    """One entry of the in-axes peer key: a short dash + two lines of text.
+
+    ``dash`` and ``pad`` are in x data units, ``dy`` in y data units, so the
+    same helper serves both the ms-scaled and the us-scaled chart.
+    """
+    bb = dict(facecolor=t["surface"], edgecolor="none", pad=1.4)
+    ax.plot([x, x + dash], [y, y], color=color, lw=1.6, ls=ls, zorder=5,
+            solid_capstyle="butt")
+    ax.text(x + pad, y, title, ha="left", va="center", fontsize=8.2, color=color,
+            zorder=5, bbox=bb)
+    ax.text(x + pad, y - dy, sub, ha="left", va="center", fontsize=7.2,
+            color=t["muted"], zorder=5, bbox=bb)
 
 
 def chart_ledger(mode: str) -> None:
     t = THEMES[mode]
     _style(t)
-    fig, ax = plt.subplots(figsize=(10.5, 4.9), dpi=200)
+    fig = plt.figure(figsize=(10.5, 8.6), dpi=200)
+    # top = prehistory (5 rows), bottom = the paired ledger (8 rows)
+    axp = fig.add_axes((0.360, 0.700, 0.625, 0.163))
+    ax = fig.add_axes((0.360, 0.098, 0.625, 0.462))
 
+    # ---------------- top panel: prehistory, absolute bars -----------------
+    npre = len(PREHISTORY)
+    ypre = list(range(npre))[::-1]
+    axp.set_xlim(0, 322)
+    axp.set_ylim(-0.60, npre - 0.22)
+    _chrome(axp, t)
+
+    for y, (label, ms, delta, _src) in zip(ypre, PREHISTORY):
+        _rounded_hbar(axp, y, 0, ms, 0.52, t["s1"])
+        txt = f"{ms:.1f} ms" if delta is None else f"{ms:.1f} ms   ({delta:+.1f} vs E0)"
+        axp.text(ms + 5, y, txt, ha="left", va="center", fontsize=8.6,
+                 color=t["ink"] if delta is None else t["ink2"])
+    axp.set_yticks(ypre)
+    axp.set_yticklabels([r[0] for r in PREHISTORY], fontsize=8.6)
+    axp.tick_params(axis="x", labelsize=8)
+
+    # where the ledger below starts, on this panel's (different) ruler
+    axp.axvline(LEDGER[0][1], color=t["s3"], lw=1.4, ls=(0, (3, 2.5)), zorder=2)
+    axp.text(LEDGER[0][1] + 6, npre - 0.42,
+             "52.60 ms - where the ledger below starts (same config as E3, other ruler)",
+             ha="left", va="center", fontsize=7.4, color=t["s3"])
+
+    fig.text(0.012, 0.884,
+             "PREHISTORY - full RLinf worker + nsys, 2026-07-03, a different box.  "
+             "Absolute bars, not a waterfall.",
+             ha="left", va="bottom", fontsize=8.8, fontweight="bold", color=t["s1"])
+    fig.text(0.012, 0.866,
+             "E1 and E2 are single-factor arms off E0, not a cumulative chain.",
+             ha="left", va="bottom", fontsize=7.6, color=t["muted"])
+
+    # ---------------- the ruler change, spelled out between the panels -----
+    fig.text(0.012, 0.632,
+             "58.9 -> 52.60 ms is a RULER CHANGE, not an optimization: full Ray + EnvWorker "
+             "path under nsys  ->  standalone bench, plain wall clock, another box.",
+             ha="left", va="bottom", fontsize=8.2, fontweight="bold", color=t["s2"])
+    fig.text(0.012, 0.612,
+             "Both sides run the same torch.compile max-autotune config.  The two panels "
+             "must not be chained into a single speedup.",
+             ha="left", va="bottom", fontsize=7.6, color=t["muted"])
+
+    # ---------------- bottom panel: the paired ledger waterfall ------------
     base = LEDGER[0][1]
     rows = LEDGER[1:]
     n = len(rows)
     ys = list(range(n))[::-1]
 
     ax.set_xlim(41.9, 53.7)
-    ax.set_ylim(-0.75, n - 0.05)
-    fig.subplots_adjust(left=0.295, right=0.985, top=0.845, bottom=0.145)
+    ax.set_ylim(-2.45, n - 0.05)
     _chrome(ax, t)
 
     ax.axvline(base, color=t["s1"], lw=1.8, zorder=2)
     ax.text(base - 0.15, n - 0.10, f"baseline  {base:.2f} ms", ha="right",
             va="top", fontsize=10, fontweight="bold", color=t["s1"])
-    ax.axvline(PEER_MS, color=t["s2"], lw=1.6, ls=(0, (4, 3)), zorder=2)
-    ax.text(PEER_MS + 0.16, n - 0.10, PEER_LABEL, ha="left", va="top",
-            fontsize=8.5, color=t["s2"])
-    ax.text(PEER_MS + 0.16, n - 0.42, "separate session - not a paired A/B",
-            ha="left", va="top", fontsize=7.5, color=t["muted"])
+
+    # the vertical peer lines stop above the key block so they do not run
+    # through its text (ymin is an axes fraction, y = -0.75 in data units)
+    vmin = (-0.75 - ax.get_ylim()[0]) / (ax.get_ylim()[1] - ax.get_ylim()[0])
+    ax.axvline(PEER_MS, ymin=vmin, color=t["s2"], lw=1.6, ls=(0, (4, 3)), zorder=2)
+    ax.axvline(FLUX_MS, ymin=vmin, color=t["muted"], lw=1.4, ls=(0, (1.6, 2.2)),
+               zorder=2)
+    # peer key parked below the waterfall
+    _peer_key(ax, t, 42.0, -1.20, t["s2"], (0, (4, 3)),
+              "dexmal/realtime-vla @b86a942: 43.41 ms",
+              "config-matched, same GPU - but a separate session: not a paired A/B",
+              dash=0.26, pad=0.38, dy=0.36)
+    _peer_key(ax, t, 42.0, -1.95, t["muted"], (0, (1.6, 2.2)),
+              "limxdynamics/FluxVLA @7f9f774 - a different repo: 44.9 ms",
+              "968 tok but chunk 10, and their timer skips CPU preproc - NOT config-matched",
+              dash=0.26, pad=0.38, dy=0.36)
 
     prev = base
     for y, (label, after, delta, _src) in zip(ys, rows):
         _rounded_hbar(ax, y, after, prev, 0.54, t["s3"])
         ax.plot([prev, prev], [y - 0.42, y + 0.70], color=t["axis"], lw=1.0,
                 ls=(0, (2, 2)), zorder=1)
+        # bbox = surface: the value labels overrun the peer rules, and the
+        # label must read on top of them rather than be crossed out by them
+        lbb = dict(facecolor=t["surface"], edgecolor="none", pad=1.0)
         ax.text(after - 0.14, y, f"{delta:+.2f}", ha="right", va="center",
-                fontsize=10.5, fontweight="bold", color=t["ink"])
+                fontsize=10.5, fontweight="bold", color=t["ink"], bbox=lbb,
+                zorder=4)
         last = y == ys[-1]
         ax.text(prev + 0.14, y, f"{after:.2f} ms", ha="left", va="center",
                 fontsize=11 if last else 9,
                 fontweight="bold" if last else "normal",
-                color=t["ink"] if last else t["ink2"])
+                color=t["ink"] if last else t["ink2"], bbox=lbb, zorder=4)
         prev = after
 
     ax.set_yticks(ys)
     ax.set_yticklabels([r[0] for r in rows], fontsize=9.5)
     ax.set_xlabel("end-to-end predict_action_batch latency (ms), plain wall clock",
                   fontsize=9.5)
+    fig.text(0.012, 0.578,
+             "PAIRED LEDGER - standalone bench, plain wall clock, one A/B per row.  "
+             "Waterfall: bar length = the ms that row bought.",
+             ha="left", va="bottom", fontsize=8.8, fontweight="bold", color=t["s3"])
 
     fig.suptitle("pi0.5 action expert, bs=1: 52.60 -> 42.90 ms  (-9.70 ms, -18.4%)",
-                 x=0.012, ha="left", fontsize=14, fontweight="bold", color=t["ink"])
-    fig.text(0.012, 0.895,
-             "every step bit-exact against the unoptimised path (max|delta| = 0.00e+00); "
-             "bar length = the ms that step bought",
+                 x=0.012, y=0.978, ha="left", fontsize=14, fontweight="bold",
+                 color=t["ink"])
+    fig.text(0.012, 0.936,
+             "every ledger step bit-exact against the unoptimised path "
+             "(max|delta| = 0.00e+00) - no quantization, no fewer denoise steps",
              ha="left", fontsize=9, color=t["ink2"])
-    fig.text(0.012, 0.015,
+    fig.text(0.012, 0.012,
              "RTX PRO 5000 (GB202/sm_120), 300 W cap - K=10 Euler steps, 968 prefix tokens, "
-             "chunk 50, bf16, no quantization - x-axis starts at 41.9 ms (waterfall: bars encode deltas)",
+             "chunk 50, bf16 - lower panel x-axis starts at 41.9 ms (waterfall: bars encode deltas)",
              ha="left", fontsize=7.5, color=t["muted"])
     fig.savefig(OUT / f"ledger_{mode}.png")
     plt.close(fig)
 
 
 # --------------------------------------------------------------------------
-# Chart 2 - denoise per-kernel breakdown, current build
+# Chart 2 - the denoise-step ledger (us per denoise step)
+# --------------------------------------------------------------------------
+# Same idea as chart 1, on a different y-axis: what one *denoise step* costs.
+#
+# MAIN PANEL ruler: GPU busy per denoise step = union of kernel intervals over
+# the denoise loop, / 10 steps.  At bs=1 nothing overlaps, so this equals the
+# naive sum of kernel durations (HEADTOHEAD_realtime_vla_pro5k.md:274), which
+# is how the later rows were measured (nsys 2026.1.2, stream 157).  All rows
+# and BOTH peers sit on this one ruler.
+#
+#   2025.6 / 347 k  MFU_denoise_analysis.md:93  "OURS baseline (pre-cache)",
+#                   denoise-loop busy 20.256 ms/predict, kernels/step 347
+#   1620.9 / 346 k  MFU_denoise_analysis.md:94  "OURS + adaRMS cache",
+#                   16.209 ms/predict - same table, same session => PAIRED
+#   1368.0 / 305 k  PROFILES_INDEX.md:142 = kernel_fusion/RESULTS_fusion.md:20
+#                   (base.nsys-rep, both fusions off), 20 predicts
+#   1236.0 / 238 k  PROFILES_INDEX.md:146 = kernel_fusion/RESULTS_fusion.md:23
+#                   (f_guard.nsys-rep, shipped).  RESULTS_fusion.md:24 states
+#                   the delta as -132.0 (-9.6 %) => PAIRED with 1368.0
+#   1185.0 / 217 k  pi05-infer commit 62aa78e; docs/MEASUREMENTS.md:193,205.
+#                   Its own paired baseline is 1232.3 (prof_skip0, same
+#                   session), i.e. -47.3; on this chain the drop reads -51.0.
+#
+# Caveats deliberately encoded in the chart text:
+#   - row 2 lumps four optimizations and is CROSS-SESSION (07-25 -> 07-27), not
+#     a paired A/B.  Note also MFU_denoise_analysis.md:104: the Stage-1 graph is
+#     *not* faster in GPU-busy terms - it converts idle into busy (idle/predict
+#     3.74 -> 0.93 ms).  Its win shows up in wall clock, not here.
+#   - the 07-28 per-kernel census of the 238-kernel build reads 1232.6
+#     (HANDOFF_20260728.md:58) and its step_idle union reads 1233.3 - same
+#     build as 1236.0, different session.  Not charted as a step.
+#
+# (label, us_after, delta, kernels, paired?, source)
+DEN_BASE = (2025.6, 347, "MFU_denoise_analysis.md:93 (pre-adaRMS-cache baseline)")
+DEN_LEDGER = [
+    ("+ adaRMS modulation table", 1620.9, -404.7, 346, True,
+     "MFU_denoise_analysis.md:94 (same table, same session)"),
+    ("+ fused QKV, static KV, on-device masks (+ Stage-1 graph)", 1368.0, -252.9, 305, False,
+     "PROFILES_INDEX.md:142 - cross-session lump, four changes"),
+    ("+ SwiGLU & QKV+RoPE epilogue fusion", 1236.0, -132.0, 238, True,
+     "kernel_fusion/RESULTS_fusion.md:24 (-132.0, -9.6%)"),
+    ("+ drop the dead timestep conditioning", 1185.0, -51.0, 217, True,
+     "MEASUREMENTS.md:193 (own paired baseline 1232.3 -> 1185.0, -47.3)"),
+]
+
+# Earlier rungs on a DIFFERENT ruler: wall clock per step, i.e. GPU busy *plus*
+# per-step idle and CPU.  Kept in their own panel; they must not be chained
+# onto the panel below.
+#   2255  PROFILES_INDEX.md:324 - denoise/loop NVTX span 22.554 ms / 10, nsys
+#         2025.3.1, 2026-07-09 pro5k baseline.  (Busy in that same profile is
+#         21.887 ms -> 2188.7 us/step; RESULTS_bubble_timeline.md:108.)
+#   2286 -> 1881  adarms_cache_impl/RESULTS_adarms_cache.md:14 - denoise/loop
+#         "sync-timed" (torch.cuda.synchronize per phase, no profiler),
+#         22.86 -> 18.81 ms/predict, the same A/B that moved e2e 52.60 -> 49.77.
+# NOT charted: the oldest figure, "2115 us/step @ 417 kernels"
+# (HANDOFF_latency_investigation.md:39, opt_validation/denoise_kernel_trace.md:10).
+# Its own doc says the source sqlite is not in the tree (PROFILES_INDEX.md:417),
+# and 2.115 ms is exactly the `denoise/expert_forward` span in the sibling
+# profile (RESULTS_bubble_timeline.md:113) while `denoise/loop` there is 2.255 -
+# so the 2115 figure is probably expert-only, a narrower scope than every other
+# number here.  Left out rather than charted on a guess.
+DEN_WALL_MARK = (2255.0, "2026-07-09 baseline, NVTX denoise/loop span / 10")
+DEN_WALL_PAIR = (2286.0, 1881.0, "adaRMS modulation table, paired sync-timed wall clock")
+
+# Peers, on the main panel's ruler (union of kernel intervals per step).
+#   1191.0 / 165  HEADTOHEAD_realtime_vla_pro5k.md:271 (sd 13.2), dexmal/
+#                 realtime-vla @b86a942, config-matched, same GPU, same day.
+#                 Its paired counterpart is our 1368.7 / 306 from that session
+#                 (= the 1368.0 / 305 row here, a different capture of the same
+#                 build).  1185.0 vs 1191.0 is CROSS-SESSION - not a reversal.
+#   1419.0 / 205  MFU_denoise_analysis.md:96,98 - limxdynamics/FluxVLA @7f9f774,
+#                 same table and same ruler as our 2025.6 / 1620.9 rows.
+#                 (fluxvla_per_module.md:39 gives 1404 us/step from marker-to-
+#                 marker spans; MFU:316 reconciles the two at ~1408.)
+#                 Chunk 10, not 50 - a 5x smaller action-token suffix than ours.
+DEN_PEER_RTVLA = (1191.0, 165)
+DEN_PEER_FLUX = (1419.0, 205)
+
+
+def chart_denoise_ledger(mode: str) -> None:
+    t = THEMES[mode]
+    _style(t)
+    fig = plt.figure(figsize=(10.5, 7.0), dpi=200)
+    axw = fig.add_axes((0.375, 0.735, 0.610, 0.102))   # wall-clock panel
+    ax = fig.add_axes((0.375, 0.128, 0.610, 0.442))    # GPU-busy ledger
+
+    XL, XR = 1055.0, 2400.0
+
+    # ---------------- top panel: the older wall-clock ruler ----------------
+    axw.set_xlim(XL, XR)
+    axw.set_ylim(-0.55, 1.55)
+    _chrome(axw, t)
+    axw.tick_params(axis="x", labelsize=8)
+
+    mark, mark_lbl = DEN_WALL_MARK
+    axw.plot([mark], [1.0], marker="D", markersize=6, color=t["s1"], zorder=3)
+    axw.text(mark - 24, 1.0, f"{mark:.0f} us", ha="right", va="center",
+             fontsize=8.6, color=t["ink2"])
+
+    wb, wa, wlbl = DEN_WALL_PAIR
+    _rounded_hbar(axw, 0.0, wa, wb, 0.42, t["s1"])
+    axw.text(wa - 24, 0.0, f"{wa - wb:+.0f}", ha="right", va="center",
+             fontsize=9, fontweight="bold", color=t["ink"])
+    axw.text(wb + 20, 0.0, f"{wa:.0f} us", ha="left", va="center", fontsize=8.6,
+             color=t["ink2"])
+    axw.set_yticks([1.0, 0.0])
+    axw.set_yticklabels([mark_lbl, wlbl], fontsize=8.4)
+
+    fig.text(0.012, 0.858,
+             "EARLIER RUNGS, WALL-CLOCK RULER - GPU busy plus per-step idle and CPU.  "
+             "Cross-session, two different tools.",
+             ha="left", va="bottom", fontsize=8.8, fontweight="bold", color=t["s1"])
+    fig.text(0.012, 0.840,
+             "The 2255 diamond's own profile reads 2189 us/step of GPU busy.",
+             ha="left", va="bottom", fontsize=7.6, color=t["muted"])
+
+    fig.text(0.012, 0.652,
+             "These two panels use two different rulers and must not be chained.  "
+             "Wall clock includes the launch gaps that the GPU-busy ruler below excludes.",
+             ha="left", va="bottom", fontsize=8.2, fontweight="bold", color=t["s2"])
+    fig.text(0.012, 0.632,
+             "On today's build those two rulers read 1242.7 us (wall) vs 1185.0 us (busy) "
+             "- 57.7 us/step of GPU idle left.",
+             ha="left", va="bottom", fontsize=7.6, color=t["muted"])
+
+    # ---------------- bottom panel: GPU-busy ledger ------------------------
+    base, base_k, _ = DEN_BASE
+    n = len(DEN_LEDGER)
+    ys = list(range(n))[::-1]
+    ax.set_xlim(XL, XR)
+    ax.set_ylim(-2.55, n - 0.02)
+    _chrome(ax, t)
+
+    ax.axvline(base, color=t["s1"], lw=1.8, zorder=2)
+    ax.text(base - 16, n - 0.06, f"baseline  {base:.1f} us   {base_k} kern",
+            ha="right", va="top", fontsize=9.5, fontweight="bold", color=t["s1"])
+
+    prv, prk = DEN_PEER_RTVLA
+    pfv, pfk = DEN_PEER_FLUX
+    vmin = (-0.72 - ax.get_ylim()[0]) / (ax.get_ylim()[1] - ax.get_ylim()[0])
+    ax.axvline(prv, ymin=vmin, color=t["s2"], lw=1.6, ls=(0, (4, 3)), zorder=2)
+    ax.axvline(pfv, ymin=vmin, color=t["muted"], lw=1.4, ls=(0, (1.6, 2.2)),
+               zorder=2)
+
+    prev = base
+    for y, (label, after, delta, kern, paired, _src) in zip(ys, DEN_LEDGER):
+        _rounded_hbar(ax, y, after, prev, 0.50, t["s3"])
+        ax.plot([prev, prev], [y - 0.40, y + 0.68], color=t["axis"], lw=1.0,
+                ls=(0, (2, 2)), zorder=1)
+        lbb = dict(facecolor=t["surface"], edgecolor="none", pad=1.0)
+        ax.text(after - 16, y, f"{delta:+.1f}", ha="right", va="center",
+                fontsize=10, fontweight="bold", color=t["ink"], bbox=lbb,
+                zorder=4)
+        last = y == ys[-1]
+        ax.text(prev + 16, y, f"{after:.1f} us   {kern} kern", ha="left",
+                va="center", fontsize=10 if last else 8.8,
+                fontweight="bold" if last else "normal",
+                color=t["ink"] if last else t["ink2"], bbox=lbb, zorder=4)
+        if not paired:
+            ax.text(prev + 16, y - 0.30, "cross-session, not paired",
+                    ha="left", va="center", fontsize=7.2, color=t["s2"])
+        prev = after
+
+    ax.set_yticks(ys)
+    ax.set_yticklabels([r[0] for r in DEN_LEDGER], fontsize=9)
+    ax.set_xlabel("GPU busy per denoise step (us) - union of kernel intervals / 10 steps",
+                  fontsize=9.5)
+    fig.text(0.012, 0.588,
+             "GPU-BUSY LEDGER - one ruler for every row and both peers.  "
+             "Waterfall: bar length = the us/step that row bought.",
+             ha="left", va="bottom", fontsize=8.8, fontweight="bold", color=t["s3"])
+
+    _peer_key(ax, t, XL + 10, -1.05, t["s2"], (0, (4, 3)),
+              f"dexmal/realtime-vla @b86a942: {prv:.1f} us, {prk} kern/step",
+              "config-matched - but paired against our 1368.7 of that day, not against 1185.0",
+              dash=34, pad=50, dy=0.34)
+    _peer_key(ax, t, XL + 10, -1.85, t["muted"], (0, (1.6, 2.2)),
+              f"limxdynamics/FluxVLA @7f9f774 - a different repo: {pfv:.1f} us, {pfk} kern/step",
+              "chunk 10, not 50 - a 5x smaller action-token suffix.  NOT config-matched",
+              dash=34, pad=50, dy=0.34)
+
+    fig.suptitle("One denoise step: 2025.6 -> 1185.0 us GPU busy  (-41.5%), 347 -> 217 kernels",
+                 x=0.012, y=0.972, ha="left", fontsize=14, fontweight="bold",
+                 color=t["ink"])
+    fig.text(0.012, 0.922,
+             "K=10 of these per predict - 20.26 ms -> 11.85 ms of GPU busy.  "
+             "Every row bit-exact (max|delta| = 0.00e+00)",
+             ha="left", fontsize=9, color=t["ink2"])
+    fig.text(0.012, 0.012,
+             "RTX PRO 5000 (GB202/sm_120) - nsys, stream 157 - the 238-kernel build re-measured "
+             "next session reads 1232.3-1233.3 us (same build, not a step)",
+             ha="left", fontsize=7.5, color=t["muted"])
+    fig.savefig(OUT / f"denoise_ledger_{mode}.png")
+    plt.close(fig)
+
+
+# --------------------------------------------------------------------------
+# Chart 3 - denoise per-kernel breakdown, current build
 # --------------------------------------------------------------------------
 # Source: 20260728_adarms_cond/prof_skip1.sqlite, stream 157
 # (the hand-captured Stage-1 denoise graph), 12 predicts x 10 steps = 120 steps.
@@ -281,7 +615,7 @@ DENOISE_TOTAL_KERNELS = 217.0
 
 GROUP_NAMES = {
     0: "inductor Triton (torch.compile max-autotune-no-cudagraphs)",
-    1: "eager per-step glue - was 99.7 us / 70 k, half of it was dead code",
+    1: "eager per-step glue - was 99.7 us / 70 k",
     2: "hand-written fused Triton kernel (this project)",
 }
 
@@ -485,10 +819,11 @@ def main() -> None:
 
     for mode in ("light", "dark"):
         chart_ledger(mode)
+        chart_denoise_ledger(mode)
         chart_denoise(mode)
         chart_phases(mode)
     _shrink()
-    print(f"wrote 6 PNGs to {OUT}")
+    print(f"wrote 8 PNGs to {OUT}")
 
 
 if __name__ == "__main__":
