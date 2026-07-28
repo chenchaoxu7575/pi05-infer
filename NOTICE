@@ -23,7 +23,11 @@ Vendored third-party code and modifications
      - in-place refresh of weight-derived tensors (`refresh_derived_weights`);
      - optional fused SwiGLU and fused QKV+RoPE fast paths dispatching to
        `rlinf_fused_denoise.py`, each guarded and falling back to the
-       unmodified PyTorch path.
+       unmodified PyTorch path;
+     - the package-relative imports of the original file rewritten to absolute
+       `transformers.*` imports, so the file works outside the transformers
+       package tree. Every symbol not listed above is imported from the
+       installed transformers rather than copied.
 
 2. pi05_infer/gemma/rlinf_fused_denoise.py
    New code written for this project: two Triton kernels exposed as
@@ -36,7 +40,9 @@ Vendored third-party code and modifications
    Apache-2.0, via the RLinf fork (https://github.com/RLinf/openpi).
    Modifications: NVTX instrumentation, batched multi-view SigLIP prefix
    embedding, on-device construction of the prefix attention mask (removing a
-   host synchronisation), and threading of the `adarms_mod` tensor.
+   host synchronisation), threading of the `adarms_mod` tensor, and building
+   the action expert from `pi05_infer/gemma` while the PaliGemma prefix
+   continues to use the installed transformers.
 
 4. pi05_infer/_vendored/{base_policy.py, cuda_graph.py, nvtx.py}
    pi05_infer/dataconfig/, pi05_infer/engine.py, pi05_infer/builder.py
