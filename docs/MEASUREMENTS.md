@@ -11,7 +11,7 @@ checkpoint `RLinf-Pi05-LIBERO-SFT`。
 
 ---
 
-## 1. 2026-07-28 · 独立包 vs RLinf 参考路径(Stage-1 关闭)
+## 1. 2026-07-28 · 独立包 vs RLinf 参考路径(去噪 CUDA 图关闭)
 
 30 iterations after 8 warmup calls,串行,plain wall clock。
 
@@ -88,9 +88,9 @@ Triton kernel 的计数发生变化**(`cutlass::Kernel2` 75.00,`triton_tem_fused
 
 ---
 
-## 2. 2026-07-28 · `--stage1`(手写 denoise CUDA graph)
+## 2. 2026-07-28 · 把整个去噪步捕获成一张 CUDA 图(开关 `--stage1`)
 
-Stage-1 的机制随抽取一起搬了过来,但没有任何代码调用它,所以上面每一个数字都是
+这个图的机制随抽取一起搬了过来,但没有任何代码调用它,所以上面每一个数字都是
 **eager denoise loop** 测出来的。
 
 **配对 A/B**,4 轮交替、独立进程(两臂需要不同的 compile mode),各 30 iterations
@@ -121,7 +121,7 @@ wall-clock 差。每 predict 的总 GPU busy 基本持平(40.32 → 40.26 ms),�
 launch-gap 消除;丢掉 `vision_tower` 的 inductor cudagraph 的连带代价(不可避免:
 `--stage1` 把整个 build 切到 `-no-cudagraphs`)约 +0.08 ms 的 prefix busy,在噪声内。
 
-**怎么确认 graph 真的生效。** `graphNodeId` **不是**判据:Stage-1 关闭时,2160 个
+**怎么确认 graph 真的生效。** `graphNodeId` **不是**判据:开关关掉时,2160 个
 denoise kernel 也全都带 `graphNodeId`,因为 inductor 自己就发了一个 cudagraph。可靠的
 信号是:
 
@@ -150,7 +150,7 @@ block)是一组 graph node。
 Profiles:`claude_mem/pi05_rollout_forward/20260728_stage1_pi05infer_pro5k/`
 (`stage1_on.nsys-rep`、`stage1_off.nsys-rep`,加 sqlite 导出、A/B 日志和两份工具输出)。
 
-⚠️ 与旧 idle 数字对比的一个坑:2026-07-28 Stage-1 之前的那份 profile
+⚠️ 与旧 idle 数字对比的一个坑:2026-07-28 这张图之前的那份 profile
 (`pi05_infer_runs/nsys_pi05infer.sqlite`)用同一工具测到 1461.4 µs wall / 214.7 µs
 idle,而今天的 off 臂是 1390.0 / 142.2 —— 但两者 GPU busy **完全一致**(1246.7 vs
 1247.8 µs/step)。72 µs/step 的差是那次采集里的 host-side stall,不是代码变化。
@@ -158,7 +158,7 @@ idle,而今天的 off 臂是 1390.0 / 142.2 —— 但两者 GPU busy **完全�
 
 ---
 
-## 2b. 2026-07-28 · 去掉死的 timestep conditioning
+## 2b. 2026-07-28 · 删掉没人读的 timestep 条件计算(开关 `RLINF_SKIP_DEAD_ADARMS_COND`)
 
 `get_suffix_out` 每步都算 `cond = time_mlp(sinusoidal(timestep))`,但 adaRMS 调制预算表
 上线之后 `adarms_mod` 恒有值,`modeling_gemma` 的 `elif adarms_cond is not None` 分支再也
@@ -180,7 +180,7 @@ idle,而今天的 off 臂是 1390.0 / 142.2 —— 但两者 GPU busy **完全�
 | 其余 7 对 | 全部 bitwise equal,`0.00e+00` |
 
 **Kernel**,nsys 2026.1.2,`--gpu-metrics-devices=cuda-visible --cuda-graph-trace=node`,
-12 predicts,两臂前后脚拍于同一 session,stream 157(Stage-1 捕获图):
+12 predicts,两臂前后脚拍于同一 session,stream 157(捕获后的去噪图):
 
 | 类别 | skip0 n/step | skip1 n/step | Δn | Δµs/step |
 |---|--:|--:|--:|--:|
@@ -206,7 +206,7 @@ idle,而今天的 off 臂是 1390.0 / 142.2 —— 但两者 GPU busy **完全�
 
 −51.3 µs/step × 10 = **−0.51 ms/predict**(时间线口径)。
 
-**Stage-1 仍然正常捕获**(两臂都是):`denoise/expert_forward` NVTX = **0/predict**、
+**去噪图仍然正常捕获**(两臂都是):`denoise/expert_forward` NVTX = **0/predict**、
 distinct `graphId` = **1**(skip0 28560 kern,skip1 26040 kern)、
 bench 的 `_denoise_graph_captured` 断言通过。
 
