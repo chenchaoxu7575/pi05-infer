@@ -1,0 +1,48 @@
+pi05-infer
+Copyright 2026 Chenchao Xu
+
+This product includes software developed by third parties, redistributed
+under the Apache License, Version 2.0 (see LICENSE).
+
+================================================================================
+Vendored third-party code and modifications
+================================================================================
+
+1. pi05_infer/gemma/modeling_gemma.py
+   Derived from HuggingFace Transformers (`transformers/models/gemma/
+   modeling_gemma.py`), Copyright 2024 Google Inc. and the HuggingFace Inc.
+   team, Apache-2.0. The original copyright header is retained in the file.
+
+   Modifications by this project, for bs=1 flow-matching inference of the
+   pi0.5 action expert:
+     - adaptive-RMSNorm modulation threaded as a precomputed tensor
+       (`adarms_mod`) instead of a per-step per-layer projection;
+     - fused QKV projection weight (`build_qkv_fused`);
+     - static KV buffer for the frozen prefix (`prime_kv_static`), replacing
+       a per-step `torch.cat`;
+     - in-place refresh of weight-derived tensors (`refresh_derived_weights`);
+     - optional fused SwiGLU and fused QKV+RoPE fast paths dispatching to
+       `rlinf_fused_denoise.py`, each guarded and falling back to the
+       unmodified PyTorch path.
+
+2. pi05_infer/gemma/rlinf_fused_denoise.py
+   New code written for this project: two Triton kernels exposed as
+   `torch.library` custom ops (gate/up -> SwiGLU epilogue; QKV -> RoPE
+   epilogue writing into the static KV cache), each with a plain-PyTorch
+   fallback.
+
+3. pi05_infer/openpi_patched/{pi0_pytorch.py, gemma_pytorch.py}
+   Derived from openpi (https://github.com/Physical-Intelligence/openpi),
+   Apache-2.0, via the RLinf fork (https://github.com/RLinf/openpi).
+   Modifications: NVTX instrumentation, batched multi-view SigLIP prefix
+   embedding, on-device construction of the prefix attention mask (removing a
+   host synchronisation), and threading of the `adarms_mod` tensor.
+
+4. pi05_infer/_vendored/{base_policy.py, cuda_graph.py, nvtx.py}
+   pi05_infer/dataconfig/, pi05_infer/engine.py, pi05_infer/builder.py
+   Derived from RLinf (https://github.com/RLinf/RLinf), Apache-2.0.
+   `engine.py` is an extraction of the pure-inference path from RLinf's
+   `rlinf/models/embodiment/openpi/openpi_action_model.py`, with the
+   reinforcement-learning instrumentation removed.
+
+================================================================================
