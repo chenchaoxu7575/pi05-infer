@@ -70,6 +70,7 @@ from pi05_infer.openpi_patched.pi0_pytorch import (  # noqa: E402
     PI0Pytorch,
     make_att_2d_masks,
 )
+from pi05_infer.prefix_last_layer import install_skip_last_lm_layer  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +160,13 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
 
         self.torch_compile_enabled = False
         self._torch_compile_mode = None
+
+        # Prefix LM last layer: only its k_proj/v_proj feed the KV cache, everything
+        # after that is dead because sample_actions discards the prefix hidden state.
+        # Installed here so it lands BEFORE enable_torch_compile, letting inductor drop
+        # the dead ops from the traced graph. See pi05_infer/prefix_last_layer.py for
+        # the conditions under which it declines to install (VLM value head, kill switch).
+        self._prefix_last_layer_skipped = install_skip_last_lm_layer(self)
 
         # ===== Denoise-step CUDA graph (Stage 1, inference only) =====
         # Cache for the suffix attention-mask tensor. The parent embed_suffix builds it
@@ -623,6 +631,11 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
                 inputs_embeds=[prefix_embs, None],
                 use_cache=True,
             )
+        if self._prefix_last_layer_skipped:
+            # The last decoder layer no longer produces a hidden state (see
+            # prefix_last_layer.py); hand back None so a future consumer of the prefix
+            # embedding fails loudly instead of reading a 17-layer-deep stand-in.
+            prefix_output = None
         return prefix_output, prefix_pad_masks, past_key_values
 
     def get_logprob_norm(self, sample, mu, sigma):
