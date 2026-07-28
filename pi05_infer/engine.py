@@ -849,12 +849,18 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
         if self.torch_compile_enabled:
             return
 
-        # Widen inductor's mm autotune space for the two M-starved denoise GEMMs
-        # (down_proj / o_proj). Must run before the first compile, since that is
-        # when the templates are autotuned. Bit-exact; RLINF_SMALL_M_MM=0 opts out.
-        from pi05_infer.inductor_mm_tiles import install_small_m_mm_configs
+        # Widen inductor's autotune space for the M-starved denoise GEMMs: the two
+        # weight-streaming projections (down_proj / o_proj) and the P.V attention
+        # BMM. Must run before the first compile, since that is when the templates
+        # are autotuned. Both are bit-exact (BLOCK_K is pinned per shape);
+        # RLINF_SMALL_M_MM=0 / RLINF_SMALL_M_BMM=0 opt out independently.
+        from pi05_infer.inductor_mm_tiles import (
+            install_small_m_bmm_configs,
+            install_small_m_mm_configs,
+        )
 
         install_small_m_mm_configs()
+        install_small_m_bmm_configs()
 
         self.paligemma_with_expert.paligemma.model.vision_tower.forward = torch.compile(
             self.paligemma_with_expert.paligemma.model.vision_tower.forward, mode=mode
