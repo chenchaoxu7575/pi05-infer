@@ -2,6 +2,8 @@
 # prof.sh <tag> <arm> [iters]
 #
 #   arm = pi05infer -> bench/standalone_infer_bench.py     (this package)
+#   arm = stage1    -> bench/standalone_infer_bench.py --stage1  (hand-captured
+#                      denoise CUDA graph; forces max-autotune-no-cudagraphs)
 #   arm = rlinf     -> tools/ab_rlinf_reference.py         (the RLinf reference)
 #
 # nsys 2026 profile + sqlite export, both with the SAME binary: nsys 2025.x cannot
@@ -17,8 +19,12 @@ mkdir -p "$D"
 cd /workspace/rlinf_pub/pi05-infer || exit 1
 export CUDA_VISIBLE_DEVICES=0
 
+EXTRA=""
 if [ "$ARM" = "rlinf" ]; then
   SCRIPT="tools/ab_rlinf_reference.py"
+elif [ "$ARM" = "stage1" ]; then
+  SCRIPT="bench/standalone_infer_bench.py"
+  EXTRA="--stage1"
 else
   SCRIPT="bench/standalone_infer_bench.py"
 fi
@@ -33,7 +39,7 @@ $NSYS profile -t cuda,nvtx --sample=none \
   --capture-range=cudaProfilerApi --capture-range-end=stop --cuda-graph-trace=node \
   --gpu-metrics-devices=cuda-visible \
   --force-overwrite=true -o "$D/$TAG" \
-  /opt/venv/openpi/bin/python -u "$SCRIPT" --cuda-profiler --iters "$ITERS"
+  /opt/venv/openpi/bin/python -u "$SCRIPT" --cuda-profiler --iters "$ITERS" $EXTRA
 echo "PROF_RC=$?"
 
 $NSYS export --type sqlite --force-overwrite=true \

@@ -91,6 +91,16 @@ def parse_args() -> argparse.Namespace:
         default="max-autotune",
         help="torch.compile mode for the production path.",
     )
+    parser.add_argument(
+        "--stage1",
+        action="store_true",
+        help="Enable the hand-captured denoise CUDA graph (Stage 1): one complete "
+        "flow_ode step (expert forward + value + Euler + logprob) is captured and "
+        "replayed per step, removing the per-step eager dispatch. Forces "
+        "'max-autotune' -> 'max-autotune-no-cudagraphs', because inductor's own "
+        "cudagraphs cannot be nested inside a hand-captured graph. Opt-in: the "
+        "default path is unchanged.",
+    )
     parser.add_argument("--warmup", type=int, default=8)
     parser.add_argument("--iters", type=int, default=30)
     parser.add_argument("--seed", type=int, default=0)
@@ -120,6 +130,54 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# Inductor compile modes that emit their own CUDA graphs. A hand-captured graph
+# cannot wrap those (the failure mode is a runtime "accessing tensor output of
+# CUDAGraphs that has been overwritten"), so --stage1 rewrites them.
+_CUDAGRAPH_COMPILE_MODES = {"max-autotune": "max-autotune-no-cudagraphs"}
+
+
+def resolve_compile_mode(args: argparse.Namespace) -> str:
+    """The compile mode actually used, after the --stage1 rewrite."""
+    if not getattr(args, "stage1", False):
+        return args.compile_mode
+    rewritten = _CUDAGRAPH_COMPILE_MODES.get(args.compile_mode)
+    if rewritten is not None:
+        return rewritten
+    assert "no-cudagraphs" in args.compile_mode or args.compile_mode in (
+        "default",
+        "reduce-overhead-no-cudagraphs",
+    ), (
+        f"--stage1 needs a compile mode that does not emit inductor CUDA graphs, "
+        f"got --compile-mode={args.compile_mode!r}. Use "
+        f"'max-autotune-no-cudagraphs' (or pass --no-compile)."
+    )
+    return args.compile_mode
+
+
+def verify_stage1(model) -> None:
+    """Fail loudly if Stage 1 silently fell back to the eager denoise loop.
+
+    ``capture_cuda_graph`` only installs the manager; the ``torch.cuda.CUDAGraph``
+    itself is captured lazily on the first eval-shaped ``sample_actions``. Both
+    facts have to be checked, otherwise a shape-signature mismatch degrades to the
+    eager path with no visible symptom other than the runtime.
+    """
+    assert model.is_cuda_graph_enabled(), (
+        "--stage1 requested but is_cuda_graph_enabled() is False: "
+        "capture_cuda_graph() did not install a CUDAGraphManager."
+    )
+    assert getattr(model, "_denoise_graph_captured", False), (
+        "--stage1 requested and the manager exists, but no denoise graph was "
+        "captured after warmup -- the denoise loop silently ran eager. Check "
+        "_ensure_denoise_graph / the shape signature."
+    )
+    print(
+        f"stage1 enabled: {model.is_cuda_graph_enabled()}  "
+        f"denoise graph captured: {model._denoise_graph_captured}  "
+        f"signature: {model._denoise_graph_spec}"
+    )
+
+
 def build_model(args: argparse.Namespace) -> torch.nn.Module:
     """Construct the model the same way the rollout worker does."""
     from pi05_infer import build_model as _build
@@ -136,8 +194,21 @@ def build_model(args: argparse.Namespace) -> torch.nn.Module:
         noise_method="flow_sde",
     )
     model = model.to(args.device).eval()
+    mode = resolve_compile_mode(args)
     if not args.no_compile:
-        model.enable_torch_compile(mode=args.compile_mode)
+        if mode != args.compile_mode:
+            print(
+                f"--stage1: compile mode {args.compile_mode!r} -> {mode!r} "
+                "(inductor cudagraphs cannot be nested in a hand-captured graph)"
+            )
+        model.enable_torch_compile(mode=mode)
+    if getattr(args, "stage1", False):
+        # Installs the manager; the graph itself is captured on the first inference.
+        model.capture_cuda_graph(args.batch_size, args.batch_size)
+        assert model.is_cuda_graph_enabled(), (
+            "capture_cuda_graph() returned without enabling the CUDA graph manager."
+        )
+        print("stage1: CUDAGraphManager installed (graph captured on first predict)")
     return model
 
 
@@ -201,6 +272,10 @@ def run_e2e(model, env_obs: dict, args: argparse.Namespace) -> None:
         with torch.no_grad():
             model.predict_action_batch(env_obs)
     torch.cuda.synchronize()
+    if getattr(args, "stage1", False):
+        # After warmup the lazy capture must have happened; assert before timing so a
+        # silent fallback to the eager denoise loop can never be reported as a result.
+        verify_stage1(model)
 
     dev_index = torch.cuda.current_device()
     clocks = []
@@ -258,6 +333,13 @@ def run_e2e(model, env_obs: dict, args: argparse.Namespace) -> None:
 def run_phases(model, env_obs: dict, args: argparse.Namespace) -> None:
     """Sync-timed decomposition of one predict call into its NVTX phases."""
     from openpi.models import model as _model
+
+    if getattr(args, "stage1", False):
+        print(
+            "\nWARNING: --phases drives sample_mean_var_val directly, which bypasses "
+            "the captured denoise graph. The denoise/loop row below is the EAGER "
+            "cost, not the Stage-1 cost; use run_e2e for the Stage-1 number."
+        )
 
     def timed(name: str, fn):
         # Untimed warmup call: invoking the internals directly (instead of via
@@ -357,11 +439,11 @@ def main() -> None:
 
     print(f"gpu: {torch.cuda.get_device_name(args.device)}")
     print(f"torch: {torch.__version__}")
-    compile_desc = "eager" if args.no_compile else args.compile_mode
+    compile_desc = "eager" if args.no_compile else resolve_compile_mode(args)
     print(
         f"config: {args.config_name} bs={args.batch_size} num_steps={args.num_steps} "
         f"chunk={args.action_chunk} images={args.num_images}x{args.image_size} "
-        f"compile={compile_desc}"
+        f"compile={compile_desc} stage1={bool(args.stage1)}"
     )
 
     model = build_model(args)
@@ -374,6 +456,8 @@ def main() -> None:
             with torch.no_grad():
                 model.predict_action_batch(env_obs)
         torch.cuda.synchronize()
+        if args.stage1:
+            verify_stage1(model)
         # Deterministic single call for the numerical A/B: fix the CUDA RNG so the
         # initial flow-matching noise draw is reproducible across processes.
         torch.manual_seed(args.seed)
