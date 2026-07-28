@@ -26,6 +26,14 @@ Kill switches (both default to enabled; set to 0 to fall back to eager PyTorch):
 ``RLINF_FUSE_SWIGLU``, ``RLINF_FUSE_QKV_ROPE``.
 Tuning: ``RLINF_FUSE_SWIGLU_CFG="BM,BN,BK,warps,stages"`` and
 ``RLINF_FUSE_QKV_CFG="BM,BN,BK,warps,stages"``.
+
+**Op namespace.** The two custom ops are registered as ``pi05_infer::*``, not
+``rlinf::*``. ``torch.library`` namespaces are process-global, so as long as a
+container still carries the old copy of this file inside
+``transformers/models/gemma/`` (imported by the PaliGemma *prefix*), registering
+under ``rlinf::`` a second time would raise and silently disable the fusions in
+whichever copy lost the race. Kernel source, tile configs and the ``RLINF_FUSE_*``
+kill-switch names are unchanged; only the registration name differs.
 """
 
 import os
@@ -337,7 +345,7 @@ def _swiglu_ref(x: torch.Tensor, wg: torch.Tensor, wu: torch.Tensor) -> torch.Te
     )
 
 
-@torch.library.custom_op("rlinf::gate_up_swiglu", mutates_args=())
+@torch.library.custom_op("pi05_infer::gate_up_swiglu", mutates_args=())
 def gate_up_swiglu(
     x: torch.Tensor, wg: torch.Tensor, wu: torch.Tensor
 ) -> torch.Tensor:
@@ -379,7 +387,7 @@ def _(x, wg, wu):
     return x.new_empty((*x.shape[:-1], wg.shape[0]))
 
 
-@torch.library.custom_op("rlinf::qkv_rope_kv", mutates_args={"k_cache", "v_cache"})
+@torch.library.custom_op("pi05_infer::qkv_rope_kv", mutates_args={"k_cache", "v_cache"})
 def qkv_rope_kv(
     x: torch.Tensor,
     w: torch.Tensor,
@@ -501,7 +509,7 @@ def fused_gate_up_swiglu(
         or wg.shape[0] % bn
     ):
         return None
-    return torch.ops.rlinf.gate_up_swiglu(x.contiguous(), wg, wu)
+    return torch.ops.pi05_infer.gate_up_swiglu(x.contiguous(), wg, wu)
 
 
 def fused_qkv_rope_kv(
@@ -538,7 +546,7 @@ def fused_qkv_rope_kv(
         or krow0 + x.shape[1] != k_cache.shape[2]
     ):
         return None
-    return torch.ops.rlinf.qkv_rope_kv(
+    return torch.ops.pi05_infer.qkv_rope_kv(
         x.contiguous(),
         w,
         cos,

@@ -24,23 +24,36 @@ from typing import Callable, Optional, Union
 import torch
 from torch import nn
 
-from ...activations import ACT2FN
-from ...cache_utils import Cache, DynamicCache
-from ...generation import GenerationMixin
-from ...masking_utils import create_causal_mask
-from ...modeling_flash_attention_utils import FlashAttentionKwargs
-from ...modeling_layers import GradientCheckpointingLayer
-from ...modeling_outputs import (
+# ---------------------------------------------------------------------------
+# VENDORED into pi05-infer. This file was `transformers/models/gemma/modeling_gemma.py`
+# and is now `pi05_infer/gemma/modeling_gemma.py`, so the `...`-relative imports
+# below became absolute `transformers.*` imports. NOTHING ELSE about them changed:
+# every symbol here is the *unmodified* transformers symbol, imported from the
+# installed transformers rather than re-vendored. Only the five classes this file
+# actually modifies (GemmaRMSNorm / GemmaMLP / GemmaAttention / GemmaDecoderLayer /
+# GemmaModel) plus `rlinf_fused_denoise` live in this package.
+# ---------------------------------------------------------------------------
+from transformers.activations import ACT2FN
+from transformers.cache_utils import Cache, DynamicCache
+from transformers.generation import GenerationMixin
+from transformers.masking_utils import create_causal_mask
+from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
+from transformers.modeling_layers import GradientCheckpointingLayer
+from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
     SequenceClassifierOutputWithPast,
     TokenClassifierOutput,
 )
-from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
-from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
-from ...processing_utils import Unpack
-from ...utils import LossKwargs, auto_docstring, can_return_tuple, logging
-from .configuration_gemma import GemmaConfig
+from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from transformers.processing_utils import Unpack
+from transformers.utils import LossKwargs, auto_docstring, can_return_tuple, logging
+
+# GemmaConfig is unmodified by us. It *is* modified by openpi's `transformers_replace`
+# (it adds `use_adarms` / `adarms_cond_dim`), which openpi's own install applies; that
+# is a dependency of openpi, not of this package's fork.
+from transformers.models.gemma.configuration_gemma import GemmaConfig
 
 
 logger = logging.get_logger(__name__)
