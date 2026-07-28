@@ -6,19 +6,22 @@ graph uses), not cuBLAS -- comparing against cuBLAS would only measure "my
 Triton GEMM vs cuBLAS", which is a different question.
 """
 
+import os
 import sys
 
 import torch
 import torch.nn.functional as F
 
-# Which copy of ``rlinf_fused_denoise.py`` to gate. Default: the container's
-# site-packages copy (the deployed one). Pass a directory to gate a different
-# copy, e.g. the version-controlled rescue in ``pi05_infer/gemma``:
-#     python tools/bitgate.py pi05_infer/gemma
+# Which copy of ``rlinf_fused_denoise.py`` to gate. Default: this package's
+# vendored copy -- the one the action expert actually runs. Pass a directory to
+# gate a different copy, e.g. the container's old global overwrite:
+#     python tools/bitgate.py \
+#         /opt/venv/openpi/lib/python3.11/site-packages/transformers/models/gemma
 _GEMMA_DIR = (
     sys.argv[1]
     if len(sys.argv) > 1
-    else "/opt/venv/openpi/lib/python3.11/site-packages/transformers/models/gemma"
+    else os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                      "pi05_infer", "gemma")
 )
 sys.path.insert(0, _GEMMA_DIR)
 import rlinf_fused_denoise as R  # noqa: E402
