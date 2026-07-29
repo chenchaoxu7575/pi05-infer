@@ -80,6 +80,14 @@ logger = logging.getLogger(__name__)
 # Read once at import so the branch is a Python constant during CUDA-graph capture.
 _SKIP_DEAD_ADARMS_COND = os.environ.get("RLINF_SKIP_DEAD_ADARMS_COND", "1") != "0"
 
+# Kill switch for hoisting the step-invariant part of the denoise step out of the loop
+# (see ``_build_step_invariants``): the attention mask, the position ids and the rotary
+# cos/sin table are byte-identical on all ``num_steps`` Euler steps, so they are built
+# once per predict into persistent buffers instead of once per step.
+# Default on; ``RLINF_HOIST_STEP_INVARIANTS=0`` restores the per-step computation.
+# Read once at import so every branch below is a Python constant during CUDA-graph capture.
+_HOIST_STEP_INVARIANTS = os.environ.get("RLINF_HOIST_STEP_INVARIANTS", "1") != "0"
+
 
 def _to_numpy(x):
     return np.asarray(x.detach().cpu()) if torch.is_tensor(x) else x
@@ -179,6 +187,12 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
         self._denoise_graph_captured = False
         self._denoise_graph_spec = None  # config the graph was captured for
         self._denoise_static = None  # static input buffers + persistent KV cache
+        # Step-invariant denoise inputs, hoisted out of the loop (see _build_step_invariants).
+        # Persistent buffers: the captured graph records their ADDRESSES, so they are refilled
+        # with copy_ on every predict and never reallocated once the graph exists.
+        self._step_inv = None
+        self._suffix_masks_cache = None  # (key, pad_masks, att_masks, embs_dtype)
+        self._timesteps_cache = None  # (num_steps, device, dtype) -> the schedule tensor
 
     # ------------------------------------------------------------------
     # observation plumbing
@@ -343,6 +357,12 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
         # step then only gathers from this static table (device gather, capture-safe).
         self._get_adarms_table(state, noise, num_steps, device)
 
+        # Same trick, same reason: the attention mask, the position ids and the rotary cos/sin
+        # are identical on all num_steps Euler steps, so build them ONCE here into persistent
+        # buffers. Must happen before _ensure_denoise_graph so the capture records those
+        # buffers' addresses (and so this call's eager construction stays outside the capture).
+        self._build_step_invariants(state, x_t, prefix_pad_masks)
+
         # Prime the static KV buffers once per predict, so each denoise step writes only the
         # 50 new suffix tokens instead of re-concatenating the whole 968-token prefix.
         expert = self.paligemma_with_expert.gemma_expert.model
@@ -381,9 +401,125 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
     # denoise internals
     # ------------------------------------------------------------------
     def _get_timesteps(self, denoise_steps, device):
+        """The Euler schedule ``[1 ... 1/N, 0]``.
+
+        Cached: the schedule is a pure function of ``denoise_steps`` and is re-derived on
+        every denoise step by ``sample_mean_var_val``, i.e. ``linspace`` + ``zeros`` + ``cat``
+        launched ``num_steps`` times per predict for a tensor that never changes. The cached
+        tensor is never written to, and its address is stable, so it is safe to read from
+        inside the captured CUDA graph.
+        """
+        if _HOIST_STEP_INVARIANTS:
+            key = (int(denoise_steps), str(device))
+            cached = self._timesteps_cache
+            if cached is not None and cached[0] == key:
+                return cached[1]
         timesteps = torch.linspace(1, 1 / denoise_steps, denoise_steps, device=device)
         timesteps = torch.cat([timesteps, torch.zeros((1), device=device)])
+        if _HOIST_STEP_INVARIANTS:
+            self._timesteps_cache = (key, timesteps)
         return timesteps
+
+    def _suffix_masks(self, state, x_t, device):
+        """The suffix pad / attention masks, which are constants of the model config.
+
+        ``embed_suffix`` rebuilds them on every denoise step, but neither depends on the
+        timestep or on the noise *values* -- only on ``action_horizon``, ``pi05`` and the
+        batch size (``torch.ones(...)`` plus a fixed ``att_masks`` pattern). Built once with
+        the real ``embed_suffix`` (so the values and dtypes are the parent's, not a
+        re-derivation) and cached for the lifetime of the model.
+
+        Returns ``(pad_masks, att_masks, embs_dtype)``.
+        """
+        key = (int(x_t.shape[0]), tuple(x_t.shape[1:]), x_t.dtype)
+        cached = self._suffix_masks_cache
+        if cached is not None and cached[0] == key:
+            return cached[1], cached[2], cached[3]
+        t0 = torch.zeros(x_t.shape[0], dtype=torch.float32, device=device)
+        embs, pad_masks, att_masks, _ = self.embed_suffix(
+            state, x_t, t0, skip_adarms_cond=True
+        )
+        pad_masks = pad_masks.detach().clone()
+        att_masks = att_masks.detach().clone()
+        self._suffix_masks_cache = (key, pad_masks, att_masks, embs.dtype)
+        return pad_masks, att_masks, embs.dtype
+
+    def _compute_step_invariants(self, state, x_t, prefix_pad_masks):
+        """Compute the denoise inputs that are identical on every Euler step.
+
+        ``suffix_pad_masks`` is an all-ones constant and ``prefix_pad_masks`` is fixed for the
+        whole predict, so ``position_ids = sum(prefix_pad_masks) + cumsum(suffix_pad_masks) - 1``
+        does not move between steps -- and neither does the rotary ``cos``/``sin`` derived from
+        it, nor the full 4-D attention mask. Same ops, same order, same values as the per-step
+        code in ``get_suffix_out`` / ``GemmaModel.forward``; only the call count changes.
+
+        Returns ``(attn_mask_4d, position_ids, cos, sin)``.
+        """
+        device = x_t.device
+        suffix_pad_masks, suffix_att_masks, embs_dtype = self._suffix_masks(
+            state, x_t, device
+        )
+        suffix_len = suffix_pad_masks.shape[1]
+        batch_size = prefix_pad_masks.shape[0]
+        prefix_len = prefix_pad_masks.shape[1]
+
+        prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(
+            batch_size, suffix_len, prefix_len
+        )
+        suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
+        full_att_2d_masks = torch.cat([prefix_pad_2d_masks, suffix_att_2d_masks], dim=2)
+        prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
+        position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
+        attn_mask_4d = self._prepare_attention_masks_4d(full_att_2d_masks)
+
+        # Rotary table. ``GemmaModel.forward`` calls ``rotary_emb(hidden_states, position_ids)``
+        # and hidden_states is ``inputs_embeds`` cast to bf16 when the expert is bf16 -- the only
+        # thing rotary_emb reads off it is dtype/device, so reproduce that choice exactly.
+        expert = self.paligemma_with_expert.gemma_expert.model
+        hidden_dtype = embs_dtype
+        if (
+            len(expert.layers) > 0
+            and expert.layers[0].self_attn.q_proj.weight.dtype == torch.bfloat16
+        ):
+            hidden_dtype = torch.bfloat16
+        dtype_probe = torch.zeros((), dtype=hidden_dtype, device=device)
+        cos, sin = expert.rotary_emb(dtype_probe, position_ids)
+        return attn_mask_4d, position_ids, cos, sin
+
+    def _build_step_invariants(self, state, x_t, prefix_pad_masks):
+        """Refresh the hoisted step-invariant denoise inputs for this predict.
+
+        Allocated once and refilled **in place** afterwards: the Stage-1 CUDA graph records the
+        addresses of whatever ``get_suffix_out`` reads, so reallocating between predicts would
+        leave the graph pointing at a freed buffer. The shapes that could force a reallocation
+        (batch size, prefix length, action horizon) are all part of ``_denoise_graph_signature``,
+        so a shape change invalidates the graph in the same breath -- asserted below rather than
+        assumed.
+        """
+        if not _HOIST_STEP_INVARIANTS:
+            return
+        attn_mask_4d, position_ids, cos, sin = self._compute_step_invariants(
+            state, x_t, prefix_pad_masks
+        )
+        new = {
+            "attn_mask_4d": attn_mask_4d,
+            "position_ids": position_ids,
+            "cos": cos,
+            "sin": sin,
+        }
+        cur = self._step_inv
+        if cur is not None and all(
+            cur[k].shape == v.shape and cur[k].dtype == v.dtype for k, v in new.items()
+        ):
+            for k, v in new.items():
+                cur[k].copy_(v)
+            return
+        assert not self._denoise_graph_captured, (
+            "step-invariant buffers changed shape/dtype after the denoise CUDA graph was "
+            "captured; the graph still points at the old buffers. This should be unreachable "
+            "because the shapes involved are all in _denoise_graph_signature."
+        )
+        self._step_inv = {k: v.detach().clone() for k, v in new.items()}
 
     def invalidate_weight_derived_caches(self):
         """Drop every cache derived from the model weights.
@@ -395,6 +531,13 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
             37 ``dense`` weights),
           - the expert's stacked adaRMS weight and fused QKV weights.
         Cheap: the table is rebuilt lazily on the next ``sample_actions`` (one-off, ~ms).
+
+        The hoisted step invariants (``_step_inv``: attention mask, position ids, rotary
+        cos/sin) are deliberately NOT listed: none of them is derived from a weight. The
+        rotary table comes from ``rotary_emb.inv_freq``, a non-persistent buffer computed from
+        ``config.rope_theta``/``head_dim`` -- config, not a parameter, so a weight sync cannot
+        move it. They are also rebuilt from scratch on every ``sample_actions``, so they cannot
+        go stale in the first place.
         """
         expert = self.paligemma_with_expert.gemma_expert.model
         if hasattr(expert, "refresh_derived_weights"):
@@ -559,26 +702,47 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
                 self.embed_suffix(state, x_t, timestep, skip_adarms_cond=skip_cond)
             )
 
+        hoisted = self._step_inv if _HOIST_STEP_INVARIANTS else None
         with nvtx_range("denoise/suffix_mask_prep", color="white"):
-            suffix_len = suffix_pad_masks.shape[1]
-            batch_size = prefix_pad_masks.shape[0]
-            prefix_len = prefix_pad_masks.shape[1]
+            if hoisted is not None:
+                # Hoisted: the mask, the position ids and the rotary table were built once for
+                # this predict (see _build_step_invariants) because none of them depends on the
+                # Euler step. Reading the persistent buffers costs nothing here.
+                assert (
+                    hoisted["attn_mask_4d"].shape[-1]
+                    == prefix_pad_masks.shape[-1] + suffix_pad_masks.shape[-1]
+                ), (
+                    "hoisted step invariants were built for a different prefix length "
+                    f"({hoisted['attn_mask_4d'].shape[-1] - suffix_pad_masks.shape[-1]}) than "
+                    f"this call's ({prefix_pad_masks.shape[-1]}); call _build_step_invariants "
+                    "once per predict, before the denoise loop."
+                )
+                full_att_2d_masks_4d = hoisted["attn_mask_4d"]
+                position_ids = hoisted["position_ids"]
+                position_embeddings = (hoisted["cos"], hoisted["sin"])
+            else:
+                position_embeddings = None
+                suffix_len = suffix_pad_masks.shape[1]
+                batch_size = prefix_pad_masks.shape[0]
+                prefix_len = prefix_pad_masks.shape[1]
 
-            prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(
-                batch_size, suffix_len, prefix_len
-            )
+                prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(
+                    batch_size, suffix_len, prefix_len
+                )
 
-            suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
+                suffix_att_2d_masks = make_att_2d_masks(
+                    suffix_pad_masks, suffix_att_masks
+                )
 
-            full_att_2d_masks = torch.cat(
-                [prefix_pad_2d_masks, suffix_att_2d_masks], dim=2
-            )
+                full_att_2d_masks = torch.cat(
+                    [prefix_pad_2d_masks, suffix_att_2d_masks], dim=2
+                )
 
-            prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
-            position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
+                prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
+                position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
 
-            # Prepare attention masks
-            full_att_2d_masks_4d = self._prepare_attention_masks_4d(full_att_2d_masks)
+                # Prepare attention masks
+                full_att_2d_masks_4d = self._prepare_attention_masks_4d(full_att_2d_masks)
         self.paligemma_with_expert.gemma_expert.model.config._attn_implementation = (
             "eager"  # noqa: SLF001
         )
@@ -592,6 +756,7 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
                 use_cache=False,
                 adarms_cond=[None, adarms_cond],
                 adarms_mod=[None, adarms_mod],
+                position_embeddings=position_embeddings,
             )
 
         suffix_out = outputs_embeds[1]
@@ -619,9 +784,7 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
         with nvtx_range("prefix/mask_prep", color="white"):
             prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
             prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
-            prefix_att_2d_masks_4d = self._prepare_attention_masks_4d(
-                prefix_att_2d_masks
-            )
+            prefix_att_2d_masks_4d = self._prepare_attention_masks_4d(prefix_att_2d_masks)
         self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"  # noqa: SLF001
         with nvtx_range("prefix/vlm_forward", color="blue"):
             (prefix_output, _), past_key_values = self.paligemma_with_expert.forward(
@@ -871,11 +1034,9 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
         # tensor aliasing in the shared computation graph). We disable cuda graph for
         # paligemma.model.language_model since it is not CPU-bound, while gemma_expert.model
         # benefits more from cuda graph.
-        self.paligemma_with_expert.paligemma.model.language_model.forward = (
-            torch.compile(
-                self.paligemma_with_expert.paligemma.model.language_model.forward,
-                mode="max-autotune-no-cudagraphs" if mode == "max-autotune" else mode,
-            )
+        self.paligemma_with_expert.paligemma.model.language_model.forward = torch.compile(
+            self.paligemma_with_expert.paligemma.model.language_model.forward,
+            mode="max-autotune-no-cudagraphs" if mode == "max-autotune" else mode,
         )
         # adaRMS batched projection: build the stacked dense weight ONCE before compile so
         # dynamo dead-code-eliminates the lazy-build branch in GemmaModel.forward (no graph break).

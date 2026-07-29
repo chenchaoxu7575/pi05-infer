@@ -700,6 +700,7 @@ class GemmaModel(GemmaPreTrainedModel):
         cache_position: Optional[torch.LongTensor] = None,
         adarms_cond: Optional[torch.Tensor] = None,
         adarms_mod: Optional[torch.Tensor] = None,  # precomputed [B, n_norm, 3072] modulation table slice (cache path)
+        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> BaseModelOutputWithPast:
         """
@@ -751,8 +752,14 @@ class GemmaModel(GemmaPreTrainedModel):
         if len(self.layers) > 0 and self.layers[0].self_attn.q_proj.weight.dtype == torch.bfloat16:
             hidden_states = hidden_states.to(torch.bfloat16)
 
-        # create position embeddings to be shared across the decoder layers
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        # create position embeddings to be shared across the decoder layers.
+        # The caller may hand in a precomputed (cos, sin) pair: the rotary table depends only
+        # on ``position_ids``, which is fixed for the whole denoise loop, so the sampling loop
+        # builds it once per predict instead of once per Euler step (see
+        # ``OpenPi0Inference._build_step_invariants``). Same values, so the layers below cannot
+        # tell the difference.
+        if position_embeddings is None:
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         # normalized
         # Gemma downcasts the below to float16, causing sqrt(3072)=55.4256 to become 55.5

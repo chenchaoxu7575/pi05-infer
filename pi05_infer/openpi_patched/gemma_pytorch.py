@@ -113,7 +113,12 @@ class PaliGemmaWithExpertModel(nn.Module):
         use_cache: bool | None = None,
         adarms_cond: list[torch.Tensor] | None = None,
         adarms_mod: list[torch.Tensor] | None = None,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
     ):
+        assert position_embeddings is None or inputs_embeds[0] is None, (
+            "position_embeddings is only plumbed through the expert-only branch (the denoise "
+            "loop); the prefix and joint branches must build their own rotary table."
+        )
         if adarms_cond is None:
             adarms_cond = [None, None]
         if adarms_mod is None:
@@ -139,6 +144,7 @@ class PaliGemmaWithExpertModel(nn.Module):
                 use_cache=use_cache,
                 adarms_cond=adarms_cond[1] if adarms_cond is not None else None,
                 adarms_mod=adarms_mod[1] if adarms_mod is not None else None,
+                position_embeddings=position_embeddings,
             )
             suffix_output = suffix_output.last_hidden_state
             prefix_output = None
