@@ -20,7 +20,7 @@ value distribution is what decides the rounding.
 Why not ``--dump-actions``: two identical runs of the same arm already disagree
 by ~5e-3 on the actions (per-process autotune of the SigLIP LayerNorm
 reductions), so the end-to-end dump has no resolving power at the bit level.
-See claude_mem/pi05_rollout_forward/RESULTS_dump_actions_determinism.md.
+See claude_mem/pi05_rollout_forward/results/RESULTS_dump_actions_determinism.md.
 
 Usage (one process per arm, sharing one inductor cache dir so the autotune
 result cache pins every untouched decision)::
