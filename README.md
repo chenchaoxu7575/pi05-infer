@@ -29,6 +29,9 @@
 * **栏 3:同样这些优化,按一个去噪步来记账。** GPU busy 2025.6 → 1185.0 µs/step,
   kernel 数 347 → 217 —— 这一栏说明栏 2 的那些毫秒是从哪里省出来的。
 
+图里那两条虚线是参考实现的位置;均非配对测量,不作胜负判断,拆解见
+[opt.md](opt.md#s-baselines)。
+
 台账收尾之后又落地三项,**它们各自的绝对基线来自不同 session(有的锁频、有的不锁频),
 所以没有拼进 52.60 → 42.90 那条配对链,也不在图里 —— 不要接到 42.90 上**:
 
@@ -84,17 +87,7 @@ checkpoint `RLinf-Pi05-LIBERO-SFT`,torch 2.7.1+cu128,nsys 2026.1.2。
 
 ---
 
-## 三条必须跟着数字一起读的限定
-
-### 对标:与 `dexmal/realtime-vla` 是打平,不是领先
-
-我们的 42.90 ms(以及台账第 7 行的 43.16)与 [`dexmal/realtime-vla`](https://github.com/dexmal/realtime-vla)
-的 **43.41 ms** **不是配对测量** —— 相隔一天、不同 session、不同 build,差值小于本机记录在案的
-**±0.7 ms rebuild variance**。**不能**据此宣称超越;realtime-vla 是同水位的 peer。
-**唯一做过配对的那次正面对比,结果是他们赢**:同一天、同一张卡、逐项对齐的配置、同一个计时
-scope、双方都用非退化权重,**他们 43.41 ms vs 我们 44.55 ms,他们快 1.14 ms**。
-`limxdynamics/FluxVLA` 是**另一个仓库**、chunk 10 而非 50,配置未对齐,不作胜负判断。
-完整拆解(含一条被撤回的旧结论)见 [opt.md §与参考实现的对比](opt.md#s-baselines)。
+## 两条必须跟着数字一起读的限定
 
 <a id="r-numerics"></a>
 
