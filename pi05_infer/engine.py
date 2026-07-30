@@ -71,6 +71,10 @@ from pi05_infer.openpi_patched.pi0_pytorch import (  # noqa: E402
     make_att_2d_masks,
 )
 from pi05_infer.prefix_last_layer import install_skip_last_lm_layer  # noqa: E402
+from pi05_infer.prefix_qkv_fused import (  # noqa: E402
+    install_fused_prefix_qkv,
+    refresh_fused_prefix_qkv,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -529,7 +533,8 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
         computed FROM the weights and would otherwise silently keep serving stale values:
           - ``_adarms_table``: the precomputed per-timestep adaRMS modulations (built from the
             37 ``dense`` weights),
-          - the expert's stacked adaRMS weight and fused QKV weights.
+          - the expert's stacked adaRMS weight and fused QKV weights,
+          - the prefix LM's fused QKV weights (``prefix_qkv_fused.py``).
         Cheap: the table is rebuilt lazily on the next ``sample_actions`` (one-off, ~ms).
 
         The hoisted step invariants (``_step_inv``: attention mask, position ids, rotary
@@ -544,6 +549,9 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
             # In-place refresh: keeps tensor addresses stable so an already-captured CUDA graph
             # (which references these buffers) stays valid and simply reads the new values.
             expert.refresh_derived_weights()
+        # Same rule for the prefix LM's fused QKV / KV weights: in-place copy_ from the
+        # (already updated) q/k/v_proj weights, so the fused tensors keep their addresses.
+        refresh_fused_prefix_qkv(self)
         # Same rule for the modulation table: recompute from the NEW weights and refill in place.
         table = getattr(self, "_adarms_table", None)
         refs = getattr(self, "_adarms_refs", None)
@@ -1024,6 +1032,13 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
 
         install_small_m_mm_configs()
         install_small_m_bmm_configs()
+
+        # Prefix LM: merge each layer's q/k/v projections into ONE [2560, 2048] GEMM.
+        # Here, not in __init__, for two reasons: the fused weight is a copy of the
+        # projection weights, so the checkpoint must already be loaded; and the compile
+        # below has to trace the fused linear. Concatenation along N -> bit-identical.
+        # Kill switch: RLINF_FUSE_PREFIX_QKV=0.
+        self._prefix_qkv_fused_layers = install_fused_prefix_qkv(self)
 
         self.paligemma_with_expert.paligemma.model.vision_tower.forward = torch.compile(
             self.paligemma_with_expert.paligemma.model.vision_tower.forward, mode=mode
