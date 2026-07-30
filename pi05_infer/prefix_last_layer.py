@@ -124,17 +124,12 @@ def _kv_only_forward(
     normed, _gate = self.input_layernorm(hidden_states, adarms_cond)
 
     hidden_shape = (*normed.shape[:-1], -1, attn.head_dim)
-    kv_w = getattr(attn, "_pi05_kv_w", None)
-    if kv_w is not None:
-        # One [k+v, hidden] GEMM instead of two 256-wide ones -- concatenation along N,
-        # so bit-identical (pi05_infer/prefix_qkv_fused.py).
-        kv = torch.nn.functional.linear(normed, kv_w)
-        k_lin, v_lin = torch.split(kv, attn._pi05_kv_split, dim=-1)
-        key_states = k_lin.view(hidden_shape).transpose(1, 2)
-        value_states = v_lin.view(hidden_shape).transpose(1, 2)
-    else:
-        key_states = attn.k_proj(normed).view(hidden_shape).transpose(1, 2)
-        value_states = attn.v_proj(normed).view(hidden_shape).transpose(1, 2)
+    # NOT fused into one [k+v, hidden] GEMM, unlike the other 17 layers
+    # (pi05_infer/prefix_qkv_fused.py): at N = 512 cuBLAS switches to a kernel whose
+    # K-accumulation differs, and the resulting KV cache moves by 1 bfloat16 ULP.
+    # Worth 22 us of a 765 us win -- not worth spending bit-exactness on.
+    key_states = attn.k_proj(normed).view(hidden_shape).transpose(1, 2)
+    value_states = attn.v_proj(normed).view(hidden_shape).transpose(1, 2)
 
     cos, sin = position_embeddings
     # == the k_embed line of transformers' apply_rotary_pos_emb (unsqueeze_dim=1),

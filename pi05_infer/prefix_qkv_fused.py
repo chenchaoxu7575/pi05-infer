@@ -40,11 +40,24 @@ locked at 2100 MHz, inductor ``max-autotune``, RTX PRO 5000 Blackwell)::
 
     q(2048) + k(256) + v(256), three GEMMs   103.7 us
     fused qkv (2560), one GEMM                60.0 us   -43.7 us / layer
-    k(256) + v(256), two GEMMs                45.2 us   (last layer only)
-    fused kv (512), one GEMM                  23.0 us   -22.2 us / layer
 
-i.e. an upper bound of 17 x 43.7 + 22.2 = 765 us/predict.  The end-to-end number
-is in ``claude_mem/pi05_rollout_forward/results/RESULTS_prefix_qkv_geglu.md``.
+i.e. an upper bound of 17 x 43.7 = 743 us/predict.  The end-to-end number is in
+``claude_mem/pi05_rollout_forward/results/RESULTS_prefix_qkv_geglu.md``.
+
+Bit-exactness, and why the last layer is left alone
+---------------------------------------------------
+"Mathematically identical" is not the same as "bit-identical": concatenating along
+N changes which *kernel* cuBLAS/inductor picks, and a different kernel can split
+the K accumulation differently.  It has to be measured per shape.  Measured here,
+bf16, M = 968, K = 2048::
+
+    cat[q(2048), k(256), v(256)] -> 2560   bit-identical to the three GEMMs
+    cat[k(256), v(256)]          -> 512    39 % of elements move, by 1 bf16 ULP
+
+So layer 17 -- which ``prefix_last_layer.py`` has already reduced to k/v only, and
+whose ``forward`` therefore never reaches this module's patched attention forward
+-- keeps its two separate GEMMs.  Fusing it was worth 22 us of the 765 us total and
+would have cost the bit-exactness claim on the KV cache the denoise loop consumes.
 
 Why a monkeypatch and not an edit
 ---------------------------------
@@ -226,10 +239,10 @@ def install_fused_prefix_qkv(model) -> int:
     projection weights) and **before** ``torch.compile`` (the traced graph has to
     contain the fused ``linear``).
 
-    The last layer is special: when ``prefix_last_layer.py`` has replaced its
-    *decoder layer* forward, that forward calls ``k_proj``/``v_proj`` directly and
-    never reaches ``self_attn.forward``.  It gets a fused **k+v** weight instead,
-    which ``_kv_only_forward`` picks up.
+    Layers whose *decoder layer* forward has been replaced by
+    ``prefix_last_layer.py`` are skipped: that forward calls ``k_proj``/``v_proj``
+    directly and never reaches ``self_attn.forward``, and fusing its k+v is not
+    bit-exact anyway (see the module docstring).
 
     Args:
         model: the ``OpenPi0Inference`` engine.
@@ -249,9 +262,8 @@ def install_fused_prefix_qkv(model) -> int:
         if attn is None or not _fusable(attn):
             continue
         if getattr(layer, "_pi05_skip_installed", False):
-            # KV-only layer: prefix_last_layer._kv_only_forward owns it.
-            _build_stack(attn, ("k_proj", "v_proj"), "_pi05_kv_w", "_pi05_kv_split")
-            patched += 1
+            # KV-only layer: prefix_last_layer._kv_only_forward owns it and bypasses
+            # self_attn.forward. Left unfused -- cat[k, v] is not bit-exact.
             continue
         if getattr(attn, "_pi05_qkv_installed", False):
             continue
@@ -287,11 +299,6 @@ def refresh_fused_prefix_qkv(model) -> int:
                 torch.cat(
                     [attn.q_proj.weight, attn.k_proj.weight, attn.v_proj.weight], dim=0
                 )
-            )
-            n += 1
-        if getattr(attn, "_pi05_kv_w", None) is not None:
-            attn._pi05_kv_w.copy_(
-                torch.cat([attn.k_proj.weight, attn.v_proj.weight], dim=0)
             )
             n += 1
     return n

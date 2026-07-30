@@ -159,8 +159,11 @@ def main() -> int:
 
     n_patched = install_fused_prefix_qkv(model)
     print(f"install_fused_prefix_qkv patched {n_patched} layers")
-    assert n_patched == len(layers), (
-        f"expected all {len(layers)} prefix layers to be patched, got {n_patched}"
+    # The last layer is deliberately excluded (prefix_last_layer.py owns its forward,
+    # and cat[k, v] is not bit-exact -- see prefix_qkv_fused.py).
+    expected = len(layers) - int(getattr(layers[-1], "_pi05_skip_installed", False))
+    assert n_patched == expected, (
+        f"expected {expected} of {len(layers)} prefix layers to be patched, got {n_patched}"
     )
 
     with torch.no_grad():
