@@ -196,7 +196,15 @@ def _fused_qkv_attention_forward(
     q_lin, k_lin, v_lin = torch.split(qkv, self._pi05_qkv_split, dim=-1)
     query_states = q_lin.view(hidden_shape).transpose(1, 2)
     key_states = k_lin.view(hidden_shape).transpose(1, 2)
-    value_states = v_lin.view(hidden_shape).transpose(1, 2)
+    # `.contiguous()` on v only, and it is not cosmetic. Unfused, v_proj's output is
+    # its own [1, M, 256] buffer and the [1, 1, M, 256] transpose of it is contiguous
+    # (the kv-head dim is 1). Fused, v is a stride-2560 slice of the qkv buffer, and
+    # nothing downstream rewrites it -- q and k are both rematerialised by RoPE, v is
+    # not -- so the strided layout survives all the way into `prime_kv_static`'s
+    # `copy_`. Measured: 17 extra at::native::elementwise_kernel launches per predict,
+    # 3.17 us each (53.9 us/predict, ~315 GB/s), eagerly, outside the compiled graph.
+    # Making it contiguous here puts the copy inside the graph at full bandwidth.
+    value_states = v_lin.view(hidden_shape).transpose(1, 2).contiguous()
 
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
