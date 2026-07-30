@@ -157,6 +157,7 @@ def main() -> int:
     for h in handles:
         h.remove()
 
+    sd_before = {k: v.data_ptr() for k, v in model.state_dict().items()}
     n_patched = install_fused_prefix_qkv(model)
     print(f"install_fused_prefix_qkv patched {n_patched} layers")
     # The last layer is deliberately excluded (prefix_last_layer.py owns its forward,
@@ -197,6 +198,38 @@ def main() -> int:
             f"   {_digest(ka)[:12]}/{_digest(kb)[:12]}"
         )
 
+    # --- the module tree / state_dict must be untouched (RL weight sync reads it) ---
+    sd_after = {k: v.data_ptr() for k, v in model.state_dict().items()}
+    sd_keys_ok = set(sd_after) == set(sd_before)
+    sd_ptrs_ok = all(sd_after[k] == sd_before[k] for k in sd_before)
+    print(
+        f"\nstate_dict: {len(sd_after)} entries, keys unchanged={sd_keys_ok}, "
+        f"storage unchanged={sd_ptrs_ok}"
+    )
+    fused_in_sd = [k for k in sd_after if "_pi05" in k]
+    print(f"fused tensors leaked into state_dict: {fused_in_sd or 'none'}")
+
+    # --- weight sync: the fused weight is weight-derived and must refresh in place ---
+    ptr_before = attn0._pi05_qkv_w.data_ptr()  # noqa: SLF001
+    with torch.no_grad():
+        for n in ("q_proj", "k_proj", "v_proj"):
+            getattr(attn0, n).weight.add_(0.01)
+    stale = not torch.equal(
+        attn0._pi05_qkv_w,  # noqa: SLF001
+        torch.cat([attn0.q_proj.weight, attn0.k_proj.weight, attn0.v_proj.weight], 0),
+    )
+    model.invalidate_weight_derived_caches()
+    refreshed = torch.equal(
+        attn0._pi05_qkv_w,  # noqa: SLF001
+        torch.cat([attn0.q_proj.weight, attn0.k_proj.weight, attn0.v_proj.weight], 0),
+    )
+    ptr_ok = attn0._pi05_qkv_w.data_ptr() == ptr_before  # noqa: SLF001
+    print(
+        f"weight sync: went stale without refresh={stale}, "
+        f"refreshed in place={refreshed}, address stable={ptr_ok}"
+    )
+    sync_ok = stale and refreshed and ptr_ok
+
     comb_off = hashlib.sha256()
     comb_on = hashlib.sha256()
     for (ka, va), (kb, vb) in zip(kv_off, kv_on):
@@ -206,6 +239,8 @@ def main() -> int:
     print(f"             on ={comb_on.hexdigest()}")
     ok = bad == 0 and proj_bad == 0
     print(f"\nVERDICT: {'BIT-IDENTICAL' if ok else f'{bad + proj_bad} tensors DIFFER'}")
+    ok = ok and sd_keys_ok and sd_ptrs_ok and not fused_in_sd and sync_ok
+    print(f"VERDICT (incl. state_dict + weight sync): {'PASS' if ok else 'FAIL'}")
     return 0 if ok else 1
 
 

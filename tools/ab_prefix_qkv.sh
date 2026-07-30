@@ -37,8 +37,12 @@ export CUDA_VISIBLE_DEVICES=0
 # LOCK_MHZ=2100 tools/ab_prefix_qkv.sh ...
 LOCK_MHZ=${LOCK_MHZ:-}
 if [ -n "$LOCK_MHZ" ]; then
-  nvidia-smi -i 0 -lgc "$LOCK_MHZ,$LOCK_MHZ" || echo "WARN: clock lock failed"
-  trap 'nvidia-smi -i 0 -rgc' EXIT
+  # Persistence mode FIRST. Without it the driver unloads when the last CUDA process
+  # exits, and -lgc is lost with it: measured here, the arm that ran second came back
+  # at 2400 MHz against the locked arm's 2092 MHz and "won" by 6.1 ms, all of it clock.
+  nvidia-smi -i 0 -pm 1 >/dev/null 2>&1 || echo "WARN: persistence mode not enabled"
+  nvidia-smi -i 0 -lgc "$LOCK_MHZ,$LOCK_MHZ" >/dev/null || echo "WARN: clock lock failed"
+  trap 'nvidia-smi -i 0 -rgc >/dev/null' EXIT
 fi
 
 for r in $(seq 1 "$ROUNDS"); do
@@ -50,6 +54,9 @@ for r in $(seq 1 "$ROUNDS"); do
     # GPU_LOCK= (empty) skips the per-run lock -- use that when the whole campaign is
     # already wrapped in one `flock`, which is stronger: it also stops a foreign job
     # from slipping in *between* the two arms of a round and breaking the pairing.
+    # Re-assert the lock per run: belt and braces on top of persistence mode, and it
+    # also recovers if a foreign job called -rgc between the arms.
+    [ -n "$LOCK_MHZ" ] && nvidia-smi -i 0 -lgc "$LOCK_MHZ,$LOCK_MHZ" >/dev/null 2>&1
     ${LOCK:+flock "$LOCK"} env \
       RLINF_FUSE_PREFIX_QKV=$SW \
       TORCHINDUCTOR_CACHE_DIR="$TI" \
