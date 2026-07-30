@@ -41,8 +41,24 @@ locked at 2100 MHz, inductor ``max-autotune``, RTX PRO 5000 Blackwell)::
     q(2048) + k(256) + v(256), three GEMMs   103.7 us
     fused qkv (2560), one GEMM                60.0 us   -43.7 us / layer
 
-i.e. an upper bound of 17 x 43.7 = 743 us/predict.  The end-to-end number is in
-``claude_mem/pi05_rollout_forward/results/RESULTS_prefix_qkv_geglu.md``.
+i.e. an upper bound of 17 x 43.7 = 743 us/predict.
+
+MEASURED in the model, nsys 2026.1.2, 12 predicts, SM clock locked at 2100 MHz::
+
+    QKV projection kernels    1791.0 -> 1069.6 us/predict   (53 -> 19 launches)
+    + the new v clone                    17.6   (see the .contiguous() note in
+                                                the patched forward)
+    + RoPE, now reading a strided slice  15.8
+    prefix stream 7          23768.5 -> 23076.5 us/predict   -692.0 us
+    denoise stream 157       11832.2 -> 11829.4 us/predict   1630 kernels, unchanged
+    e2e paired A/B, 12 rounds, clock pinned   -0.75 +- 0.23 ms  (t = -3.2, 9/12)
+
+Full write-up: ``claude_mem/pi05_rollout_forward/results/RESULTS_prefix_qkv_geglu.md``.
+The companion idea -- fusing the GeGLU into the MLP GEMM's epilogue, which pays on
+the action expert -- was measured and is a **null on the prefix**: the gate/up GEMMs
+already run at 188 TFLOP/s through cuBLAS (~92 % of this card's achievable bf16 peak
+for the shape), Triton is 6.3 % behind on them, and the pointwise it would absorb is
+2.6 % of the MLP. It is not implemented; see §2 of the write-up.
 
 Bit-exactness, and why the last layer is left alone
 ---------------------------------------------------
@@ -56,7 +72,7 @@ bf16, M = 968, K = 2048::
 
 So layer 17 -- which ``prefix_last_layer.py`` has already reduced to k/v only, and
 whose ``forward`` therefore never reaches this module's patched attention forward
--- keeps its two separate GEMMs.  Fusing it was worth 22 us of the 765 us total and
+-- keeps its two separate GEMMs.  Fusing it was worth 22 us of the 743 us total and
 would have cost the bit-exactness claim on the KV cache the denoise loop consumes.
 
 Why a monkeypatch and not an edit
@@ -275,7 +291,9 @@ def install_fused_prefix_qkv(model) -> int:
             continue
         if getattr(attn, "_pi05_qkv_installed", False):
             continue
-        _build_stack(attn, ("q_proj", "k_proj", "v_proj"), "_pi05_qkv_w", "_pi05_qkv_split")
+        _build_stack(
+            attn, ("q_proj", "k_proj", "v_proj"), "_pi05_qkv_w", "_pi05_qkv_split"
+        )
         attn._pi05_full_attn_forward = attn.forward
         attn.forward = types.MethodType(_fused_qkv_attention_forward, attn)
         attn._pi05_qkv_installed = True
