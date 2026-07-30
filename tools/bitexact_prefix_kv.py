@@ -257,6 +257,9 @@ def main() -> int:
 
     result = {
         "skip_installed": installed,
+        # How many prefix layers got the fused q/k/v GEMM (pi05_infer/prefix_qkv_fused.py).
+        # Recorded so the digest file says which arm produced it.
+        "prefix_qkv_fused_layers": getattr(model, "_prefix_qkv_fused_layers", 0),
         "prefix_embs": embs_digest,
         "repeat_stable_in_process": repeat_stable,
         "prefix_output_is_none": captured["prefix_output_is_none"],
