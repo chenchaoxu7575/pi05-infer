@@ -20,29 +20,7 @@ Blackwell)** 做过一轮系统性优化。每一项都是代数等价变换 —
 本仓库的端到端配对台账(52.60 → 42.90 ms,就是上面那个数)、以及同样这些优化按一个去噪步
 记的账(GPU busy 2025.6 → 1185.0 µs/step,347 → 217 kernels/step)。推导见
 [opt.md § 台账](opt.md#s-ledger)、[§ 去噪单步](opt.md#s-per-step)。
-
-台账收尾之后又落地五项。⚠️ **另一把尺,不要接到 42.90 上**(它们各自的绝对基线来自不同
-session,有的锁频、有的不锁频,所以没有拼进那条配对链,也不在图里):
-
-| 优化 | 收益 | commit | 详见 |
-|---|--:|---|---|
-| 小 `M` 的 mm tile 候选(`down_proj` / `o_proj`) | **−0.88 ms/predict** | `ca4ae39` | [opt.md §3.1](opt.md#s-3-1) |
-| 跳过 prefix LM 最后一层的死算 —— ⚠️ **条件安装,见限定 3** | **−1.11 ms/predict** | `72af442` | [opt.md](opt.md#s-after-ledger) |
-| P·V 的 attention `bmm` 换 tile 长宽比 | **−0.18 ms/predict** | `ff237bf` | [opt.md §3.2b](opt.md#s-3-2b) |
-| 把步不变量从去噪循环里外提 | **−0.32 ± 0.05 ms/predict** | `0ed3ca2` | [opt.md](opt.md#s-hoist) |
-| prefix LM 的 Q/K/V 三投影并成一个 GEMM | **−0.61 ± 0.22 ms/predict** | `d7cf3c2` | [opt.md](opt.md#s-prefix-qkv) |
-
-<a id="r-config"></a>
-**测量配置**:π0.5,batch 1,**K = 10** 步 Euler 去噪,**968 个 prefix token**,
-action chunk 50,**全程 bf16**;RTX PRO 5000 72 GB(GB202,sm_120,110 SM,**300 W 功耗墙**),
-checkpoint `RLinf-Pi05-LIBERO-SFT`,torch 2.7.1+cu128,nsys 2026.1.2
-([完整配置](opt.md#s-roadmap))。
-
-## 限定
-
-1. **数值** —— 所有变换都是代数等价的,但**逐位一致性按编译路径分档**(有几项只在 eager 下逐位相同,在出货的 `max-autotune` 上不成立):[opt.md § 正确性](opt.md#s-correctness)。
-2. **对标** —— 图里那两条虚线是参考实现的位置,**均非配对测量,不作胜负判断**([opt.md § 与参考实现的对比](opt.md#s-baselines))。
-3. **prefix 跳最后一层是条件安装的** —— 检测到 VLM value head 就不装,**已发布的 19 份 pi0.5 PPO 配置里有 15 份命中这个条件**(kill switch `RLINF_SKIP_LAST_LM_LAYER=0`)。
+图里那两条虚线是参考实现的位置 —— **均非配对测量,不作胜负判断**([opt.md § 对标](opt.md#s-baselines))。
 
 ## 安装与运行
 

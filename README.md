@@ -22,30 +22,8 @@ repository (a different measurement protocol), this repository's paired end-to-e
 (52.60 → 42.90 ms, the headline), and the same optimizations accounted per denoising step
 (GPU busy 2025.6 → 1185.0 µs/step, 347 → 217 kernels/step). Derivations:
 [opt.md § ledger](opt.md#s-ledger), [§ per-step](opt.md#s-per-step).
-
-Five more items landed after the ledger was closed. ⚠️ **Different ruler — do not add them
-onto 42.90** (their absolute baselines come from separate sessions, some clock-locked,
-some not, so they are not part of the paired chain and are not in the chart):
-
-| Optimization | Gain | Commit | Details |
-|---|--:|---|---|
-| Small-`M` mm tile candidates (`down_proj` / `o_proj`) | **−0.88 ms/predict** | `ca4ae39` | [opt.md §3.1](opt.md#s-3-1) |
-| Skip the dead compute in the prefix LM's last layer — ⚠️ **conditionally installed, see caveat 3** | **−1.11 ms/predict** | `72af442` | [opt.md](opt.md#s-after-ledger) |
-| Retile the P·V attention `bmm` | **−0.18 ms/predict** | `ff237bf` | [opt.md §3.2b](opt.md#s-3-2b) |
-| Hoist the step-invariant work out of the denoise loop | **−0.32 ± 0.05 ms/predict** | `0ed3ca2` | [opt.md](opt.md#s-hoist) |
-| Merge the prefix LM's Q/K/V projections into one GEMM | **−0.61 ± 0.22 ms/predict** | `d7cf3c2` | [opt.md](opt.md#s-prefix-qkv) |
-
-<a id="r-config"></a>
-**Measured under** π0.5, batch 1, **K = 10** Euler steps, **968 prefix tokens**, action
-chunk 50, **bf16 throughout**; RTX PRO 5000 72 GB (GB202, sm_120, 110 SMs, **300 W cap**),
-checkpoint `RLinf-Pi05-LIBERO-SFT`, torch 2.7.1+cu128, nsys 2026.1.2
-([full config](opt.md#s-roadmap)).
-
-## Caveats
-
-1. **Numerics** — every transform is algebraically equivalent, but **bit-identity is tiered by compile path** (some items are bit-identical under eager only, not under the shipping `max-autotune`): [opt.md § correctness](opt.md#s-correctness).
-2. **Reference points** — the two dashed lines mark where reference implementations sit; **neither is a paired measurement and no win/loss is claimed** ([opt.md § baselines](opt.md#s-baselines)).
-3. **Skipping the prefix LM's last layer is conditionally installed** — it declines to install when a VLM value head is detected, and **15 of the 19 published pi0.5 PPO configs hit that condition** (kill switch `RLINF_SKIP_LAST_LM_LAYER=0`).
+The two dashed lines mark where reference implementations sit — neither is a
+paired measurement and no win/loss is claimed ([opt.md § baselines](opt.md#s-baselines).)
 
 ## Install and run
 
