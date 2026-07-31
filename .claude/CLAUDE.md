@@ -6,13 +6,17 @@
 
 **The root `README.md` carries only two things: the results, and how to install and run it.**
 
-Keep: the headline number, the ledger chart, install / run / verify commands, links out.
+Keep: the headline number, the ledger chart, install / run / verify commands.
 Everything else — per-optimization narratives, measurement blocks, ruler discussions,
-correctness arguments, traps, rejected approaches — lives in **`opt.md`**.
+correctness arguments, traps, rejected approaches — lives **outside this repository**, in
+`claude_mem/pi05_rollout_forward/` (`opt.md`, `MEASUREMENTS.md`, `results/`, `analysis/`).
+
+The detailed record is deliberately unpublished until this work converges. Do not move it
+back into the repo, and do not add links to it from the README — a reader must not be
+pointed at a path that does not exist for them.
 
 - `README.md` (English) and `README.zh-CN.md` must stay content-identical.
-- `docs/MEASUREMENTS.md` is the raw per-A/B archive; `EXTRACTION_NOTES.md` is the RLinf boundary.
-- **Moving something out of the README means moving it *into* `opt.md`, not deleting it.**
+- Trimming the README means moving content **into** the internal record, never deleting it.
   No measured number may be dropped without a home.
 
 ## Claims that must not be overstated
@@ -31,9 +35,14 @@ correctness arguments, traps, rejected approaches — lives in **`opt.md`**.
 ## Measurement discipline — violating these makes a result invalid, not just noisy
 
 - **e2e is plain wall clock only.** nsys wall clock carries ~2.7 ms of overhead.
-- **Paired A/B: same source toggled, serial, ≥4 alternating rounds.** Both arms must share
+- **Paired A/B: same source toggled, serial, alternating arm order.** Both arms must share
   one `TORCHINDUCTOR_CACHE_DIR` — separate caches let autotune re-pick untouched shapes and
   have produced a *sign-flipped* result.
+- **The round count is not a constant — a no-op control decides it.** Four rounds is a
+  floor, not a sufficiency proof. On one workload the null control read **−4.5 % at four
+  rounds and +0.1 % at twelve** (process-level bimodality, ~3.5 ms). Run the change with
+  the arm that should produce *no* effect, and keep adding rounds until that reads zero.
+  A result whose null control was never run is not a result.
 - **Lock the clocks.** An unlocked probe once read −1.05 ms where the real effect was
   −0.32. During a whole predict the card draws 145–205 W against a 300 W cap, so it is
   boost-limited and the arms do not self-align. `nvidia-smi -lgc` is silently dropped when
