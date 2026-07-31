@@ -18,9 +18,9 @@ Blackwell)** 做过一轮系统性优化。每一项都是代数等价变换 —
 
 三栏用的是**三把不同的尺,不能首尾相接**:本仓库开始之前的前史(另一套测量口径)、
 本仓库的端到端配对台账(52.60 → 42.90 ms,就是上面那个数)、以及同样这些优化按一个去噪步
-记的账(GPU busy 2025.6 → 1185.0 µs/step,347 → 217 kernels/step)。推导见
-[opt.md § 台账](opt.md#s-ledger)、[§ 去噪单步](opt.md#s-per-step)。
-图里那两条虚线是参考实现的位置 —— **均非配对测量,不作胜负判断**([opt.md § 对标](opt.md#s-baselines))。
+记的账(GPU busy 2025.6 → 1185.0 µs/step,347 → 217 kernels/step)。
+
+图里那两条虚线是参考实现的位置 —— **均非配对测量,不作胜负判断**。
 
 ## 安装与运行
 
@@ -41,7 +41,7 @@ docker exec -w /path/to/pi05-infer pi05bench \
 
 `pi05-infer` 不碰 `site-packages`(只加一条 path entry),所以容器保持原状,可以作为 A/B
 的参考臂。`--stage1` 会把 `max-autotune` 改写成 `max-autotune-no-cudagraphs`,并在 warmup
-之后断言图真的捕获成功 —— 否则会**静默**退回 eager loop([opt.md](opt.md#s-stage1))。
+之后断言图真的捕获成功 —— 否则会**静默**退回 eager loop。
 
 <a id="r-verify"></a>
 
@@ -65,7 +65,7 @@ GATE_OFF="RLINF_SMALL_M_MM=0" GATE_ON="RLINF_SMALL_M_MM=1" \
   tools/bitexact_gate.sh /tmp/gate_small_m --stage1 --iters 1 --warmup 4
 ```
 
-每一项优化都带 kill switch,OFF 臂走的是被验证过的降级路径([opt.md](opt.md#s-fallback))。
+每一项优化都带 kill switch,OFF 臂走的是被验证过的降级路径。
 
 <a id="r-layout"></a>
 
@@ -76,19 +76,17 @@ pi05_infer/    引擎本体(engine.py、vendoring 的动作专家 Gemma + Triton
                prefix_last_layer.py、prefix_qkv_fused.py、inductor_mm_tiles.py)
 bench/         standalone_infer_bench.py —— 延迟基准
 tools/         隔离检查、bit-exact gate、配对 A/B 驱动、profile 分析
-docs/          make_charts.py(重新生成图)+ MEASUREMENTS.md
 _extract_src/  抽取前的 RLinf 原始文件(未重构)
 ```
 
 `import pi05_infer` 只让**动作专家**走我们 vendoring 的 Gemma,PaliGemma 的 **prefix** 仍用
-原厂 transformers([opt.md § prefix / expert 的隔离](opt.md#s-isolation))。
-逐文件清单见 [opt.md § 仓库文件清单](opt.md#s-inventory)。
+原厂 transformers。
 
 ## 延伸阅读
 
-* **[`opt.md`](opt.md)** —— 完整优化记录:每项的为什么/怎么做/量了多少、正确性论证、
-  测量方法学、踩过的坑与明确排除的做法。
-* **[`docs/MEASUREMENTS.md`](docs/MEASUREMENTS.md)** —— 逐次 A/B 的原始测量数据存档。
+> **详细的优化记录尚未发布。** 逐项推导、正确性论证、测量方法学与原始 A/B 存档
+> 暂存内部,等这部分工作收敛后再一并发布。
+
 * **[`EXTRACTION_NOTES.md`](EXTRACTION_NOTES.md)** —— 从 RLinf 抽取的边界与遗留项。
 
 ## 许可证与来源

@@ -20,10 +20,10 @@ against a `torch.compile max-autotune` baseline.
 Three panels, **three different rulers — they do not chain**: the prehistory before this
 repository (a different measurement protocol), this repository's paired end-to-end ledger
 (52.60 → 42.90 ms, the headline), and the same optimizations accounted per denoising step
-(GPU busy 2025.6 → 1185.0 µs/step, 347 → 217 kernels/step). Derivations:
-[opt.md § ledger](opt.md#s-ledger), [§ per-step](opt.md#s-per-step).
+(GPU busy 2025.6 → 1185.0 µs/step, 347 → 217 kernels/step).
+
 The two dashed lines mark where reference implementations sit — neither is a
-paired measurement and no win/loss is claimed ([opt.md § baselines](opt.md#s-baselines).)
+paired measurement and no win/loss is claimed
 
 ## Install and run
 
@@ -48,7 +48,7 @@ docker exec -w /path/to/pi05-infer pi05bench \
 stays pristine and can serve as the reference arm of an A/B.
 `--stage1` rewrites `max-autotune` into `max-autotune-no-cudagraphs` and asserts after
 warmup that the graph really was captured — otherwise it falls back to the eager loop
-**silently** ([opt.md](opt.md#s-stage1)).
+**silently**.
 
 <a id="r-verify"></a>
 
@@ -73,8 +73,7 @@ GATE_OFF="RLINF_SMALL_M_MM=0" GATE_ON="RLINF_SMALL_M_MM=1" \
   tools/bitexact_gate.sh /tmp/gate_small_m --stage1 --iters 1 --warmup 4
 ```
 
-Every optimization has a kill switch, and the OFF arm exercises a verified fallback path
-([opt.md](opt.md#s-fallback)).
+Every optimization has a kill switch, and the OFF arm exercises a verified fallback path.
 
 <a id="r-layout"></a>
 
@@ -85,20 +84,19 @@ pi05_infer/    the engine (engine.py, the vendored action-expert Gemma + Triton 
                kernels, prefix_last_layer.py, prefix_qkv_fused.py, inductor_mm_tiles.py)
 bench/         standalone_infer_bench.py -- latency bench
 tools/         isolation check, bit-exactness gates, paired A/B drivers, profile analysis
-docs/          make_charts.py (regenerates the charts) + MEASUREMENTS.md
 _extract_src/  the original RLinf files before extraction (not refactored)
 ```
 
 `import pi05_infer` routes **only the action expert** through the vendored Gemma; the
-PaliGemma **prefix** keeps stock transformers ([opt.md § isolation](opt.md#s-isolation)).
-Per-file inventory: [opt.md § inventory](opt.md#s-inventory).
+PaliGemma **prefix** keeps stock transformers.
 
 ## Further reading
 
-* **[`opt.md`](opt.md)** (Chinese) — the complete optimization record: why/how/how-much per
-  item, the correctness argument, the measurement methodology, the traps, and the
-  approaches explicitly ruled out.
-* **[`docs/MEASUREMENTS.md`](docs/MEASUREMENTS.md)** — the raw per-A/B measurement archive.
+> **The detailed optimization notes are not published yet.** The per-item
+> derivations, the correctness argument, the measurement methodology and the raw
+> A/B archive are kept internally until this work converges, and will be released
+> then.
+
 * **[`EXTRACTION_NOTES.md`](EXTRACTION_NOTES.md)** — the extraction boundary against RLinf.
 
 ## License and provenance
