@@ -295,9 +295,17 @@ Six changes, all imports / module plumbing except the one in 8.3:
 | `pi05_infer/engine.py` | `from openpi.models_pytorch.pi0_pytorch import PI0Pytorch, make_att_2d_masks` → `from pi05_infer.openpi_patched.pi0_pytorch import …` |
 
 Not one line of kernel code, model code, tile config or numerics changed. `BLOCK_K`
-stays 64 (SwiGLU) / 128 (QKV); `RLINF_FUSE_SWIGLU`, `RLINF_FUSE_QKV_ROPE`,
-`RLINF_FUSE_*_CFG` and `RLINF_FUSE_SWIGLU_MAX_M` keep their names and defaults; both
+stays 64 (GeGLU) / 128 (QKV); `RLINF_FUSE_GEGLU`, `RLINF_FUSE_QKV_ROPE`,
+`RLINF_FUSE_*_CFG` and `RLINF_FUSE_GEGLU_MAX_M` keep their names and defaults; both
 PyTorch fallbacks are untouched.
+
+> **Naming, 2026-07-31.** The gate/up fusion was called *SwiGLU* everywhere until
+> this date. That was a misnomer: SwiGLU is `silu(gate) * up`, while Gemma — and
+> this kernel — computes `gelu_tanh(gate) * up`, i.e. **GeGLU**
+> (`hidden_act = "gelu_pytorch_tanh"`). Code, ops and docs have been renamed; no
+> number, guard or numeric behaviour changed. The pre-rename environment variables
+> (`RLINF_FUSE_SWIGLU`, `RLINF_FUSE_SWIGLU_CFG`, `RLINF_FUSE_SWIGLU_MAX_M`) are
+> still accepted as aliases, and history before this date reads `SwiGLU` throughout.
 
 ### 8.2 Vendored vs. imported from `transformers` / `openpi`
 
@@ -335,12 +343,12 @@ Only two openpi files carry local modifications and hence are vendored:
 
 `torch.library` namespaces are **process-global**. `transformers.models.gemma` is
 still imported in every run (the prefix needs it), and in the current container that
-copy still does `from . import rlinf_fused_denoise`, registering `rlinf::gate_up_swiglu`
+copy still does `from . import rlinf_fused_denoise`, registering `rlinf::gate_up_geglu`
 and `rlinf::qkv_rope_kv`. Registering the same names from `pi05_infer/gemma` would
 raise; `modeling_gemma` catches that (`except Exception: _FUSED_OPS = None`), so the
 failure mode is **silent loss of both fusions** in whichever copy imports second —
 i.e. an unannounced perf regression, exactly the class of bug this task exists to
-remove. The vendored ops are therefore registered as `pi05_infer::gate_up_swiglu` /
+remove. The vendored ops are therefore registered as `pi05_infer::gate_up_geglu` /
 `pi05_infer::qkv_rope_kv`. Op *name*, kernel source, tile configs, guards, fallbacks
 and env-var names are unchanged; only the registration namespace differs, and the
 GPU-side kernel names in nsys are unaffected.
@@ -381,7 +389,7 @@ Two consequences of leaving the container as-is, both harmless:
 
 1. Both copies of `rlinf_fused_denoise.py` are imported and both compile their Triton
    kernels — but only on first use, and the prefix never reaches a fused kernel
-   (`_SWIGLU_MAX_M = 64` < 968, so `fused_gate_up_swiglu` returns `None` and the
+   (`_GEGLU_MAX_M = 64` < 968, so `fused_gate_up_geglu` returns `None` and the
    prefix falls back to eager). Identical to the measured baseline.
 2. When site-packages is eventually restored, the prefix loses even that per-layer
    `None`-returning check. Strictly less CPU work; nothing else changes.
@@ -401,7 +409,7 @@ prefix GemmaModel / decoder layer / attention / MLP / RMSNorm
 prefix PaliGemma       transformers.models.paligemma.modeling_paligemma
 prefix vision tower    transformers.models.siglip.modeling_siglip
 expert _FUSED_OPS      /workspace/rlinf_pub/pi05-infer/pi05_infer/gemma/rlinf_fused_denoise.py
-torch.ops.pi05_infer.{gate_up_swiglu,qkv_rope_kv}   True
+torch.ops.pi05_infer.{gate_up_geglu,qkv_rope_kv}   True
 ISOLATION_OK
 ```
 
@@ -409,7 +417,7 @@ ISOLATION_OK
 
 | check | result |
 |---|---|
-| `tools/bitgate.py` (now defaults to `pi05_infer/gemma`) — SwiGLU vs inductor | bitwise equal, `max|Δ| = 0.00e+00`, 0/204800 elems differing |
+| `tools/bitgate.py` (now defaults to `pi05_infer/gemma`) — GeGLU vs inductor | bitwise equal, `max|Δ| = 0.00e+00`, 0/204800 elems differing |
 | … QKV+RoPE q / k / v vs inductor | bitwise equal, `max|Δ| = 0.00e+00`; q strides identical `(102400,256,2048,1)` |
 | end-to-end actions `[1,50,6]` float64, fixed seed, vs the RLinf path | **bitwise equal, `max|Δ| = 0.00e+00`** |
 
@@ -448,11 +456,12 @@ names) are **byte-identical pre vs post** on streams 7, 157 and 158 for *both* a
 The busy-time deltas are run-to-run noise — note the reference arm, which did not
 change at all, moved 5× more than ours.
 
-Stream 157 still shows `_swiglu_mm_kernel` 180.00/step and `_qkv_rope_kernel`
+Stream 157 still shows `_geglu_mm_kernel` 180.00/step and `_qkv_rope_kernel`
 180.00/step, i.e. both fusions are live on the expert through the vendored module.
 Inductor names the wrapper kernel after the op *name*, not the namespace, so
-`triton_per_fused__to_copy_add_gate_up_swiglu_mean_mul_pow_rsqrt` is unchanged and the
-counts remain directly comparable with the pre-change profiles.
+`triton_per_fused__to_copy_add_gate_up_geglu_mean_mul_pow_rsqrt` tracks the op name
+(it read `…_gate_up_swiglu_…` before the 2026-07-31 rename) while the counts remain
+directly comparable with the pre-change profiles.
 
 The only kernel-count differences anywhere are the 6 per-predict RL-bookkeeping
 kernels between `pi05_infer` and RLinf that §6 already documented (`reduce_kernel` −1,

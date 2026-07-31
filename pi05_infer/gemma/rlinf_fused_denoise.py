@@ -3,7 +3,7 @@
 Two matmul-**epilogue** fusions, each behind a ``torch.library`` custom op with a
 plain-PyTorch fallback:
 
-1. ``fused_gate_up_swiglu`` -- ``gelu_tanh(x @ Wg.T) * (x @ Wu.T)`` in one kernel
+1. ``fused_gate_up_geglu`` -- ``gelu_tanh(x @ Wg.T) * (x @ Wu.T)`` in one kernel
    (two accumulators over one shared A tile), replacing inductor's
    ``triton_tem_fused_mm_13`` + ``triton_tem_fused_gelu_mm_mul_14``.
 2. ``fused_qkv_rope`` -- ``rope(x @ Wqkv.T)`` in one kernel, writing q into a
@@ -23,17 +23,26 @@ element and are free tuning knobs.
 Precision is unchanged everywhere: bf16 operands, fp32 accumulate, bf16 store.
 
 Kill switches (both default to enabled; set to 0 to fall back to eager PyTorch):
-``RLINF_FUSE_SWIGLU``, ``RLINF_FUSE_QKV_ROPE``.
-Tuning: ``RLINF_FUSE_SWIGLU_CFG="BM,BN,BK,warps,stages"`` and
+``RLINF_FUSE_GEGLU``, ``RLINF_FUSE_QKV_ROPE``.
+Tuning: ``RLINF_FUSE_GEGLU_CFG="BM,BN,BK,warps,stages"`` and
 ``RLINF_FUSE_QKV_CFG="BM,BN,BK,warps,stages"``.
+
+The gate/up fusion was called *SwiGLU* until 2026-07-31; that was a misnomer.
+SwiGLU is ``silu(gate) * up``, whereas Gemma -- and therefore this kernel -- uses
+``gelu_tanh(gate) * up``, i.e. GeGLU (``hidden_act = "gelu_pytorch_tanh"``). Only
+the name changed; the arithmetic is untouched. The pre-rename environment
+variables (``RLINF_FUSE_SWIGLU``, ``RLINF_FUSE_SWIGLU_CFG``,
+``RLINF_FUSE_SWIGLU_MAX_M``) are still honoured as aliases so that archived
+repro commands keep working.
 
 **Op namespace.** The two custom ops are registered as ``pi05_infer::*``, not
 ``rlinf::*``. ``torch.library`` namespaces are process-global, so as long as a
 container still carries the old copy of this file inside
 ``transformers/models/gemma/`` (imported by the PaliGemma *prefix*), registering
 under ``rlinf::`` a second time would raise and silently disable the fusions in
-whichever copy lost the race. Kernel source, tile configs and the ``RLINF_FUSE_*``
-kill-switch names are unchanged; only the registration name differs.
+whichever copy lost the race. Kernel source and tile configs are unchanged; only
+the registration name -- and, since the GeGLU rename, the ``RLINF_FUSE_SWIGLU*``
+spelling of the kill switches -- differs.
 """
 
 import os
@@ -43,22 +52,37 @@ import torch
 
 __all__ = [
     "HAVE_FUSED_DENOISE_OPS",
-    "fuse_swiglu_enabled",
+    "fuse_geglu_enabled",
     "fuse_qkv_rope_enabled",
-    "fused_gate_up_swiglu",
+    "fused_gate_up_geglu",
     "fused_qkv_rope_kv",
 ]
 
 
-def _env_int(name: str, default: int) -> int:
+def _env_raw(name: str, legacy: Optional[str] = None) -> Optional[str]:
+    """``$name``, falling back to a pre-rename ``$legacy`` alias when unset.
+
+    The gate/up fusion's switches were spelled ``RLINF_FUSE_SWIGLU*`` before the
+    GeGLU rename; archived repro commands still use them.
+    """
+    raw = os.environ.get(name)
+    if not raw and legacy is not None:
+        raw = os.environ.get(legacy)
+    return raw
+
+
+def _env_int(name: str, default: int, legacy: Optional[str] = None) -> int:
+    raw = _env_raw(name, legacy)
+    if not raw:
+        return default
     try:
-        return int(os.environ.get(name, str(default)))
+        return int(raw)
     except ValueError:
         return default
 
 
-def _env_cfg(name: str, default: tuple) -> tuple:
-    raw = os.environ.get(name)
+def _env_cfg(name: str, default: tuple, legacy: Optional[str] = None) -> tuple:
+    raw = _env_raw(name, legacy)
     if not raw:
         return default
     parts = tuple(int(p) for p in raw.split(","))
@@ -85,10 +109,12 @@ except Exception:  # pragma: no cover - triton missing / too old
 # BLOCK_K values are pinned to what inductor's autotuner picked for these exact
 # shapes on sm_120; changing them changes the fp32 reduction order over K and
 # breaks bit-exactness against the unfused path (it stays algebraically exact).
-_SWIGLU_CFG = _env_cfg("RLINF_FUSE_SWIGLU_CFG", (64, 32, 64, 4, 4))
+_GEGLU_CFG = _env_cfg(
+    "RLINF_FUSE_GEGLU_CFG", (64, 32, 64, 4, 4), legacy="RLINF_FUSE_SWIGLU_CFG"
+)
 _QKV_CFG = _env_cfg("RLINF_FUSE_QKV_CFG", (64, 16, 128, 4, 4))
 
-# The SwiGLU fusion only pays off in the short-sequence (decode / denoise-suffix)
+# The GeGLU fusion only pays off in the short-sequence (decode / denoise-suffix)
 # regime it is tuned for: there the gate activation round-trip through HBM and the
 # extra launch dominate. On a long prefix (M in the hundreds) that cost is
 # amortised, the GEMM becomes compute-bound, and a single hand-fixed tile config
@@ -96,12 +122,16 @@ _QKV_CFG = _env_cfg("RLINF_FUSE_QKV_CFG", (64, 16, 128, 4, 4))
 # the fusion also fired on PaliGemma's 968-token prefix LM (which is a Gemma too)
 # and cost +6.5 ms/predict there -- 5x more than the whole denoise-side win.
 # Default = one M-tile, i.e. exactly the regime the kernel was written for.
-_SWIGLU_MAX_M = _env_int("RLINF_FUSE_SWIGLU_MAX_M", _SWIGLU_CFG[0])
+_GEGLU_MAX_M = _env_int(
+    "RLINF_FUSE_GEGLU_MAX_M", _GEGLU_CFG[0], legacy="RLINF_FUSE_SWIGLU_MAX_M"
+)
 
 
-def fuse_swiglu_enabled() -> bool:
-    """True when the fused gate/up+SwiGLU kernel should be used."""
-    return HAVE_FUSED_DENOISE_OPS and _env_int("RLINF_FUSE_SWIGLU", 1) != 0
+def fuse_geglu_enabled() -> bool:
+    """True when the fused gate/up+GeGLU kernel should be used."""
+    return HAVE_FUSED_DENOISE_OPS and (
+        _env_int("RLINF_FUSE_GEGLU", 1, legacy="RLINF_FUSE_SWIGLU") != 0
+    )
 
 
 def fuse_qkv_rope_enabled() -> bool:
@@ -112,7 +142,7 @@ def fuse_qkv_rope_enabled() -> bool:
 if HAVE_FUSED_DENOISE_OPS:
 
     @triton.jit
-    def _swiglu_mm_kernel(
+    def _geglu_mm_kernel(
         A,
         WG,
         WU,
@@ -335,7 +365,7 @@ if HAVE_FUSED_DENOISE_OPS:
 # ---------------------------------------------------------------------------
 
 
-def _swiglu_ref(x: torch.Tensor, wg: torch.Tensor, wu: torch.Tensor) -> torch.Tensor:
+def _geglu_ref(x: torch.Tensor, wg: torch.Tensor, wu: torch.Tensor) -> torch.Tensor:
     """Plain-PyTorch reference: the exact op sequence GemmaMLP.forward runs."""
     return (
         torch.nn.functional.gelu(
@@ -345,8 +375,8 @@ def _swiglu_ref(x: torch.Tensor, wg: torch.Tensor, wu: torch.Tensor) -> torch.Te
     )
 
 
-@torch.library.custom_op("pi05_infer::gate_up_swiglu", mutates_args=())
-def gate_up_swiglu(
+@torch.library.custom_op("pi05_infer::gate_up_geglu", mutates_args=())
+def gate_up_geglu(
     x: torch.Tensor, wg: torch.Tensor, wu: torch.Tensor
 ) -> torch.Tensor:
     """gelu_tanh(x @ wg.T) * (x @ wu.T) in a single fused GEMM."""
@@ -356,9 +386,9 @@ def gate_up_swiglu(
     a = x.reshape(-1, k)
     m = a.shape[0]
     out = torch.empty(m, n, dtype=x.dtype, device=x.device)
-    bm, bn, bk, warps, stages = _SWIGLU_CFG
+    bm, bn, bk, warps, stages = _GEGLU_CFG
     grid = (triton.cdiv(m, bm) * triton.cdiv(n, bn),)
-    _swiglu_mm_kernel[grid](
+    _geglu_mm_kernel[grid](
         a,
         wg,
         wu,
@@ -382,7 +412,7 @@ def gate_up_swiglu(
     return out.view(*lead, n)
 
 
-@gate_up_swiglu.register_fake
+@gate_up_geglu.register_fake
 def _(x, wg, wu):
     return x.new_empty((*x.shape[:-1], wg.shape[0]))
 
@@ -484,19 +514,19 @@ def _needs_autograd(*tensors: torch.Tensor) -> bool:
     return torch.is_grad_enabled() and any(t.requires_grad for t in tensors)
 
 
-def fused_gate_up_swiglu(
+def fused_gate_up_geglu(
     x: torch.Tensor, wg: torch.Tensor, wu: torch.Tensor
 ) -> Optional[torch.Tensor]:
-    """Fused SwiGLU, or ``None`` when the fast path does not apply."""
-    if not fuse_swiglu_enabled() or _needs_autograd(x, wg, wu):
+    """Fused GeGLU, or ``None`` when the fast path does not apply."""
+    if not fuse_geglu_enabled() or _needs_autograd(x, wg, wu):
         return None
-    bk = _SWIGLU_CFG[2]
-    bn = _SWIGLU_CFG[1]
+    bk = _GEGLU_CFG[2]
+    bn = _GEGLU_CFG[1]
     m = 1
     for s in x.shape[:-1]:
         m *= s
     if (
-        m > _SWIGLU_MAX_M
+        m > _GEGLU_MAX_M
         or not x.is_cuda
         or x.dtype not in (torch.bfloat16, torch.float16)
         or wg.dtype is not x.dtype
@@ -509,7 +539,7 @@ def fused_gate_up_swiglu(
         or wg.shape[0] % bn
     ):
         return None
-    return torch.ops.pi05_infer.gate_up_swiglu(x.contiguous(), wg, wu)
+    return torch.ops.pi05_infer.gate_up_geglu(x.contiguous(), wg, wu)
 
 
 def fused_qkv_rope_kv(

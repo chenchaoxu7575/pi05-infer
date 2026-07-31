@@ -127,7 +127,7 @@ def main() -> int:
     elif not V._FUSED_OPS.__file__.startswith(__import__("os").path.dirname(V.__file__)):
         print(f"FAIL: fused ops came from {V._FUSED_OPS.__file__}")
         ok = False
-    for op in ("gate_up_swiglu", "qkv_rope_kv"):
+    for op in ("gate_up_geglu", "qkv_rope_kv"):
         have = hasattr(torch.ops.pi05_infer, op)
         print(f"{'torch.ops.pi05_infer.' + op:42s} {have}")
         if not have:

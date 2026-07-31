@@ -81,15 +81,15 @@ pointed at a path that does not exist for them.
 
 ## Things already settled — do not re-litigate
 
-- **Tile tuning on the denoise GEMMs is exhausted.** SwiGLU (8 configs) and `qkv_rope`
+- **Tile tuning on the denoise GEMMs is exhausted.** GeGLU (8 configs) and `qkv_rope`
   (9 configs) are both at their optimum; on both, more CTAs is monotonically worse and
   `warps` 4→8 is worse. `down_proj`/`o_proj` were retuned once; the remaining corners are
   reachable and simply slower.
-- `BLOCK_K` is **per-shape**, not globally 128 (SwiGLU 64, `down_proj` 128, and one bmm
+- `BLOCK_K` is **per-shape**, not globally 128 (GeGLU 64, `down_proj` 128, and one bmm
   shape has no stable choice at all). `BLOCK_M`/`BLOCK_N`/`warps`/`stages` are numerically
   inert — 17 configs measured.
 - **Metrics improving ≠ kernel faster ≠ e2e faster.** ncu's occupancy signal pointed the
-  wrong way twice: adding warps to SwiGLU cost 17 %, adding CTAs to the P·V bmm cost 30 %.
+  wrong way twice: adding warps to GeGLU cost 17 %, adding CTAs to the P·V bmm cost 30 %.
   The dispatch-savings theory is disproved — e2e gain equals the kernel-time reduction, so
   convert kernel counts to time with measured durations, never a per-launch constant.
 - Rejected with measurements: fp8/quantization (precision is off the table), whole-model

@@ -149,15 +149,15 @@ class GemmaMLP(nn.Module):
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
-        # The fused gate/up+SwiGLU kernel hard-codes tanh-approximated GELU.
-        self._swiglu_fusable = config.hidden_act in ("gelu_pytorch_tanh", "gelu_new")
+        # The fused gate/up+GeGLU kernel hard-codes tanh-approximated GELU.
+        self._geglu_fusable = config.hidden_act in ("gelu_pytorch_tanh", "gelu_new")
 
     def forward(self, x):
         # Fused path: gelu_tanh(x @ Wg.T) * (x @ Wu.T) in ONE GEMM with two
         # accumulators over a shared A tile, replacing two GEMMs plus the
         # activation round-trip through HBM. Returns None when inapplicable.
-        if _FUSED_OPS is not None and self._swiglu_fusable:
-            act = _FUSED_OPS.fused_gate_up_swiglu(
+        if _FUSED_OPS is not None and self._geglu_fusable:
+            act = _FUSED_OPS.fused_gate_up_geglu(
                 x, self.gate_proj.weight, self.up_proj.weight
             )
             if act is not None:

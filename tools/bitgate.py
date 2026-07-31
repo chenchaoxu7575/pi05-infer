@@ -57,15 +57,15 @@ def report(tag, ref, got):
     return same
 
 
-# ---------------------------------------------------------------- swiglu
-def swiglu_eager(x, wg, wu):
+# ----------------------------------------------------------------- geglu
+def geglu_eager(x, wg, wu):
     return F.gelu(F.linear(x, wg), approximate="tanh") * F.linear(x, wu)
 
 
-swiglu_c = torch.compile(swiglu_eager, mode=MODE, fullgraph=True)
-ref = swiglu_c(x, wg, wu)
-got = R.fused_gate_up_swiglu(x, wg, wu)
-ok1 = report("swiglu vs inductor", ref, got)
+geglu_c = torch.compile(geglu_eager, mode=MODE, fullgraph=True)
+ref = geglu_c(x, wg, wu)
+got = R.fused_gate_up_geglu(x, wg, wu)
+ok1 = report("geglu vs inductor", ref, got)
 
 
 # ---------------------------------------------------------------- qkv+rope

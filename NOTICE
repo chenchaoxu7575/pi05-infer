@@ -21,7 +21,7 @@ Vendored third-party code and modifications
      - static KV buffer for the frozen prefix (`prime_kv_static`), replacing
        a per-step `torch.cat`;
      - in-place refresh of weight-derived tensors (`refresh_derived_weights`);
-     - optional fused SwiGLU and fused QKV+RoPE fast paths dispatching to
+     - optional fused GeGLU and fused QKV+RoPE fast paths dispatching to
        `rlinf_fused_denoise.py`, each guarded and falling back to the
        unmodified PyTorch path;
      - the package-relative imports of the original file rewritten to absolute
@@ -31,7 +31,7 @@ Vendored third-party code and modifications
 
 2. pi05_infer/gemma/rlinf_fused_denoise.py
    New code written for this project: two Triton kernels exposed as
-   `torch.library` custom ops (gate/up -> SwiGLU epilogue; QKV -> RoPE
+   `torch.library` custom ops (gate/up -> GeGLU epilogue; QKV -> RoPE
    epilogue writing into the static KV cache), each with a plain-PyTorch
    fallback.
 

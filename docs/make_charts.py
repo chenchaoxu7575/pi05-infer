@@ -197,7 +197,7 @@ LEDGER = [
      "adarms_cache_impl/RESULTS_adarms_cache.md UPDATE 3"),
     ("build the attention mask on the GPU", 44.79, -0.31,
      "attmask_fix/RESULTS_attmask.md"),
-    ("fuse SwiGLU and RoPE into the GEMM epilogue", 43.74, -1.05,
+    ("fuse GeGLU and RoPE into the GEMM epilogue", 43.74, -1.05,
      "kernel_fusion/RESULTS_fusion.md (own paired A/B: 44.87 -> 43.74, -1.14)"),
     ("extract to a standalone package, graph on", 43.16, -0.58,
      "20260728_stage1_pi05infer_pro5k/ab_stage1_summary.txt (paired 44.08 -> 43.16)"),
@@ -289,7 +289,7 @@ DEN_LEDGER = [
      "MFU_denoise_analysis.md:94 (same table, same session)"),
     ("merge Q/K/V, static KV, mask on GPU (+ the graph)", 1368.0, -252.9, 305, False,
      "PROFILES_INDEX.md:142 - cross-session lump, four changes"),
-    ("fuse SwiGLU and RoPE into the GEMM epilogue", 1236.0, -132.0, 238, True,
+    ("fuse GeGLU and RoPE into the GEMM epilogue", 1236.0, -132.0, 238, True,
      "kernel_fusion/RESULTS_fusion.md:24 (-132.0, -9.6%)"),
     ("delete the timestep conditioning nothing reads", 1185.0, -51.0, 217, True,
      "MEASUREMENTS.md:193 (own paired baseline 1232.3 -> 1185.0, -47.3)"),
@@ -525,7 +525,7 @@ def chart_ledger(mode: str) -> None:
 #   group 1 = eager per-step glue (the remaining headroom)
 #   group 2 = our hand-written fused kernels
 DENOISE = [
-    ("SwiGLU: gate/up GEMM + gelu(g)*u  [fused]", 312.41, 18, 2),
+    ("GeGLU: gate/up GEMM + gelu(g)*u  [fused]", 312.41, 18, 2),
     ("down_proj GEMM", 271.19, 18, 0),
     ("o_proj GEMM (+ transpose prologue)", 152.46, 18, 0),
     ("QKV GEMM + RoPE -> static KV  [fused]", 131.79, 18, 2),
@@ -555,8 +555,10 @@ def derive_denoise(sqlite_path: str, n_steps: float = 120.0) -> None:
     ).fetchall()
 
     def bucket(name: str) -> str:
-        if name == "_swiglu_mm_kernel":
-            return "SwiGLU: gate/up GEMM + gelu(g)*u  [fused]"
+        # "_swiglu_mm_kernel" is the pre-2026-07-31 name of the same kernel;
+        # archived profiles still carry it.
+        if name in ("_geglu_mm_kernel", "_swiglu_mm_kernel"):
+            return "GeGLU: gate/up GEMM + gelu(g)*u  [fused]"
         if name == "triton_tem_fused_mm_10":
             return "down_proj GEMM"
         if name == "triton_tem_fused_clone_mm_8":
