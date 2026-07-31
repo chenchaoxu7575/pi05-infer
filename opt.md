@@ -14,7 +14,7 @@
 | [优化脉络:三段](#s-roadmap) | 消除 / 融合 / 压 kernel 的分工与优先级 |
 | [台账之前:前史](#s-prehistory) | E-series、`torch.compile` 的 4.1×、换尺子的那 6 ms |
 | [优化台账](#s-ledger) | 52.60 → 42.90 ms 的配对链、逐行脚注 |
-| [台账之后](#s-after-ledger) | small-M mm tile、prefix 跳层、P·V bmm |
+| [台账之后](#s-after-ledger) | small-M mm tile、prefix 跳层、P·V bmm、[步不变量外提](#s-hoist)、[prefix QKV 融合](#s-prefix-qkv) |
 | [命名对照](#s-naming) | 台账里的说法 ↔ 代码/开关/profile 里的简写 |
 | [去噪单步的台账](#s-per-step) | 换纵轴:µs/step 与 kernels/step |
 | [① 消除](#s-eliminate) | §1.1–1.5 |
@@ -26,9 +26,13 @@
 | [测量方法学](#s-methodology) | 7 条规矩 + `torch.empty` 零权重陷阱 |
 | [已知限制 / 没做的事](#s-limits) | 剩下的坑 |
 
-测试配置(所有数字都在这个配置下测得)见 [README 的「配置」一节](README.md#r-config):
-π0.5,bs=1,K=10 步 Euler 去噪,968 prefix token,action chunk 50,全程 bf16,
-RTX PRO 5000(GB202 / sm_120,110 SM,1344 GB/s,300 W 功耗墙)。
+**测试配置(所有数字都在这个配置下测得)**,另见
+[README 的「配置」一节](README.md#r-config):π0.5,bs=1,K=10 步 Euler 去噪,
+**968 个 prefix token**(3 路相机 × 256 patch + 200 个语言 token),action chunk 50,
+全程 bf16。动作专家是 gemma_300m:**18 层,d = 1024,mlp 4096,8 个 query head /
+1 个 KV head(MQA),head_dim 256,50 个 action token**。机器 RTX PRO 5000 72 GB
+(GB202 / sm_120,110 SM,1344 GB/s,300 W 功耗墙);checkpoint `RLinf-Pi05-LIBERO-SFT`,
+torch 2.7.1+cu128,nsys 2026.1.2。
 
 ---
 
@@ -155,9 +159,9 @@ e2e = `predict_action_batch`,plain wall clock(**不是** nsys 的 wall time),
 
 <a id="s-after-ledger"></a>
 
-### 台账之后:又落地的三项(**第三把尺,不要接到 42.90 上**)
+### 台账之后:又落地的五项(**第三把尺,不要接到 42.90 上**)
 
-这三项的绝对基线来自**各自的 session**,而且有的锁频、有的不锁频,所以它们
+这五项的绝对基线来自**各自的 session**,而且有的锁频、有的不锁频,所以它们
 **不能**和上面那条 52.60 → 42.90 的配对链首尾相接 —— 和"前史"那一栏是同样的处理。
 每项都列出全部口径,不挑好看的:
 
@@ -166,6 +170,8 @@ e2e = `predict_action_batch`,plain wall clock(**不是** nsys 的 wall time),
 | 小 M 的 mm tile 候选(`down_proj` / `o_proj`) | **−0.88 ms/predict** | `ca4ae39` | ✅ 编译(GEMM 级 sha256) |
 | 跳过 prefix LM 最后一层的死算 | **−1.11 ms/predict**(保守口径) | `72af442` | ✅ eager(KV 级 36/36);编译态见下 |
 | P·V 的 attention `bmm` 换 tile 长宽比 | **−0.18 ms/predict** | `ff237bf` | ✅ 编译(核级 digest,18 层) |
+| 把步不变量从去噪循环里外提 | **−0.32 ± 0.05 ms/predict** | `0ed3ca2` | ✅ 编译(核级 `0.00e+00`) |
+| prefix LM 的 Q/K/V 三投影并成一个 GEMM | **−0.61 ± 0.22 ms/predict** | `d7cf3c2` | ✅ 编译(KV 级 36/36 + digest) |
 
 **小 M 的 mm tile 候选(−0.88 ms)。** M=50 时 inductor 的库存候选里 `BLOCK_M` 只有
 `{32, 64}`,冠军 `BM64 BN32` 让 `down_proj`/`o_proj` 各只铺 **32 个 CTA**(110 个 SM)。
@@ -220,6 +226,80 @@ Kill switch:`RLINF_SKIP_LAST_LM_LAYER=0`。
 
 **P·V 的 attention `bmm` 换 tile 长宽比(−0.18 ms)。** 完整叙述见 §3.2b。
 
+<a id="s-hoist"></a>
+
+#### 把步不变量从去噪循环里外提(−0.32 ms)
+
+**为什么。** 4 维 attention mask、position ids
+(`sum(prefix_pad_masks) + cumsum(suffix_pad_masks) − 1`)和 RoPE 的 cos/sin 表,在 10 个
+Euler 步上**逐字节相同** —— `suffix_pad_masks` 是全 1 常量,`prefix_pad_masks` 在整个
+predict 内固定 —— 可它们每步都被重建一次;而且 inductor 每步会把 `[1, 50, 256]` 的 cos/sin
+表**物化 32 份**(每个消费它的层一份,因为融合的 QKV+RoPE 是个不透明的自定义算子)。
+这正是 §3.3 点名的那一类"逐步重复的 glue"。
+
+**怎么做。** 改成**每 predict 建一次**,写进常驻缓冲区,位置和理由都与 §1.1 的 adaRMS 调制表
+相同:构造是 eager 的、必须留在 CUDA 图捕获之外,而它的输出缓冲区必须在捕获之前就存在,
+好让图把地址记进去。缓冲区用 `copy_` 重填,**绝不重新分配**。
+
+**量了多少。** nsys 2026.1.2,4 轮交替配对,SM 时钟锁 2302 MHz:
+
+```
+denoise  stream 157   217.00 -> 190.00 kernels/step,  1202.68 -> 1165.32 us/step
+prefix   stream 7     +27 kernels/predict, +36.2 us/predict   (每 predict 一次的重建开销)
+e2e                   43.93 -> 43.61 ms,  -0.32 +- 0.05 ms,  4/4 轮同号
+```
+
+注意 prefix 侧是**净增**的:把每步一次的重建换成每 predict 一次,代价记在 stream 7 上
+(+36.2 µs),收益记在 stream 157 上(−37.4 µs/step × 10 步)。e2e 的 −0.32 ms 是两者之差,
+已经把这笔代价扣掉了。
+
+**数值。** **核级逐位相同**:生产 shape 下 eager 与 inductor 编译出的 cos/sin 差
+`0.00e+00`(12800 个元素 0 个不同),mask 和 position ids 同样如此。
+Kill switch:`RLINF_HOIST_STEP_INVARIANTS=0`。
+
+<a id="s-prefix-qkv"></a>
+
+#### prefix LM 的 Q/K/V 合成一个 GEMM(−0.61 ms)
+
+**为什么 —— 而且理由和去噪侧不是同一个,别把论证照搬。** expert(M = 50)那边的机理是
+**占用率崩塌**(§2.1):k/v 只产出 50×256,Triton 落在 grid = 8,110 个 SM 里只有 8 个在干活。
+prefix 的 M = 968,**根本不缺并行度** —— 它的 k/v GEMM 跑 **248 个 CTA**,机器是满的。
+它慢是因为 **N = 256 太窄,摊不动 A 的流量**:inductor 的冠军 tile **要走 2048 步 K 才产出
+1024 个数**,只跑到 **41 TFLOP/s,对比 MLP 的 188**。k+v **只占 LM 的 0.9 % FLOP,却吃掉
+3.3 % 的核时间**。把 N 从 256 拓宽到 2560,k 和 v 就落进"A 的流量已经付过钱"的 tile 里。
+
+**怎么做。** 三个投影读的是同一份激活,所以并成一个 `[2560, 2048]` 的 GEMM 再切开 ——
+在 **18 层里的 17 层**上生效(`pi05_infer/prefix_qkv_fused.py`)。只有 KV-only 的末层
+(归 `prefix_last_layer.py` 管)保留两个独立 GEMM,因为那里的 `cat[k, v]` **不是**
+逐位相同的。
+
+**量了多少。** 实测在 vendoring 边界恢复之后(见[§ prefix / expert 的隔离](#s-isolation)),
+nsys 2026.1.2,12 个 predict,SM 时钟锁 2092 MHz:
+
+```
+prefix   stream 7     23762.2 -> 23091.2 us/predict   -671.0 us   (633 -> 616 kernels)
+denoise  stream 157   两臂都是 1630 个核,launch delta 0,耗时 -0.02%(噪声)
+SigLIP   stream 158   两臂都是 383 个核,未变
+e2e 配对 A/B,12 轮,锁频:   -0.61 +- 0.22 ms   (t = -2.75, 9/12 同号)
+```
+
+结论取 nsys 核时间的 **−671 µs**;e2e 那个数是量级旁证(噪声底 sd ≈ 0.8 ms)。
+
+**数值。** **在编译路径上逐位相同**,而且判据够强:两臂分别是 0 层融合与 17 层融合,
+**36 个 prefix KV 张量全部 `0.00e+00`**,combined digest 完全一致 —— 与"跳过 prefix LM
+最后一层"同档(gate:`tools/bitexact_prefix_qkv.py`)。
+Kill switch:`RLINF_FUSE_PREFIX_QKV=0`。
+
+#### 实测否定:prefix 上的 GeGLU epilogue 融合(不交付)
+
+把 `gelu_tanh(gate) * up` 融进 GEMM 尾部,在去噪侧成立(§2.2),**在 prefix 上不成立**。
+prefix 的 gate/up GEMM 已经跑在 **188 TFLOP/s ≈ 该形状 cuBLAS 可达峰值的 92 %**;要融就得
+把它从 cutlass 换成 Triton,而 Triton 在这个形状上**慢 6.3 %(+44 µs/层)**,
+被融掉的 pointwise 只值 **28 µs/层**。**入场费大于奖品** —— 实测两次,两次都亏。
+(对比去噪侧:那边 Triton 本来就比 cuBLAS 快 9 %,入场费是负的 —— 所以
+"epilogue 融合总是赚"这条经验**不能跨 shape 迁移**,要先量 Triton 与 cutlass 在该形状上的
+差距,那才是入场费。)
+
 <a id="s-naming"></a>
 
 ### 命名对照:每个名字对应代码里的什么
@@ -239,6 +319,8 @@ Kill switch:`RLINF_SKIP_LAST_LM_LAYER=0`。
 | 小 M 的 mm tile 候选 | `pi05_infer/inductor_mm_tiles.py`;开关 `RLINF_SMALL_M_MM`(默认开) |
 | P·V 的 attention `bmm` 换 tile | 同一个文件的 `install_small_m_bmm_configs()`;开关 `RLINF_SMALL_M_BMM`(默认开) |
 | 跳过 prefix LM 最后一层的死算 | `pi05_infer/prefix_last_layer.py`;开关 `RLINF_SKIP_LAST_LM_LAYER`(默认开,检测到 VLM value head 自动不装) |
+| 把步不变量从去噪循环里外提 | `engine.py` 里的常驻 mask / position id / cos-sin 缓冲区;开关 `RLINF_HOIST_STEP_INVARIANTS`(默认开) |
+| prefix LM 的 Q/K/V 并成一个 GEMM | `pi05_infer/prefix_qkv_fused.py`;开关 `RLINF_FUSE_PREFIX_QKV`(默认开,末层不融) |
 | 关掉推理期的类型检查(前史) | `RLINF_DISABLE_OPENPI_TYPECHECK=1` |
 | 三路相机合成一次视觉编码(前史) | `openpi_patched/pi0_pytorch.py::embed_prefix` 里写死的 `torch.cat(images, dim=0)` —— ⚠️ **没有开关**(曾经写成 `RLINF_SIGLIP_BATCHED=1`,那个环境变量全树不存在),而且它**不是**逐位一致的,见「台账之前」 |
 
@@ -769,7 +851,11 @@ Kill switch:`RLINF_SMALL_M_BMM=0`。
 rotary 表的 `cos`/`sin`、`_get_timesteps` 的 `linspace` —— 这些在 10 个 Euler 步上
 **完全相同**,和已经预计算掉的 adaRMS 调制量是同一类问题,同一套解法(预计算 + 每步 gather)。
 另外还有真正每步都不同的 Euler 更新与 log-prob,那部分动不了。
-**量级 ~0.5 ms。状态:未做。**
+
+**状态:部分已做。** 其中 attention mask、position ids 和 RoPE 的 cos/sin 表已经在
+[「把步不变量从去噪循环里外提」](#s-hoist)里外提掉了(kernels/step 217 → 190,
+e2e −0.32 ms);`_get_timesteps` 的 `linspace` 与其余零碎还留着 —— 原估的 ~0.5 ms 里已兑现
+0.32 ms,**剩下那部分没有单独量过**。
 
 ### 3.4 明确排除的做法
 
@@ -782,7 +868,8 @@ rotary 表的 `cos`/`sin`、`_get_timesteps` 的 `linspace` —— 这些在 10 
   挡住)、强制 Triton-only 后端(§② 开头那个已结的负结果)、把 gated residual 塞进 GEMM
   epilogue(本来就已融进消费端 RMSNorm,kernel 数不变)、给 SwiGLU 融合核扫 tile
   (§3.2)、给 P·V 的 bmm 用 `BLOCK_M=16`(§3.2b,慢 30 %)、给 Q·Kᵀ 加候选
-  (§3.2b,库存冠军已在最优 1.6 % 内,加候选只会重掷骰子)。
+  (§3.2b,库存冠军已在最优 1.6 % 内,加候选只会重掷骰子)、**在 prefix 上做 GeGLU
+  epilogue 融合**(见「台账之后」,入场费 +44 µs/层 > 奖品 28 µs/层,实测两次都亏)。
 
 ---
 
@@ -803,7 +890,8 @@ rotary 表的 `cos`/`sin`、`_get_timesteps` 的 `linspace` —— 这些在 10 
 ⚠️ 这张图和上面这两个数拍摄于 prefix 跳层之前。跳掉第 17 层之后 stream 7 是
 23.95 → 22.83 ms/predict,denoise 侧一个核都没变,所以 prefix 的占比只是从 ~71.7 %
 略降,结论方向不变。**"大头在 prefix"这条正是「跳过 prefix LM 最后一层」的由来** ——
-它是本仓库第一项打在 prefix 上的优化,也是唯一一项。同类审计还没做完:
+它是本仓库第一项打在 prefix 上的优化,第二项是[prefix QKV 融合](#s-prefix-qkv)(−671 µs)。
+同类审计还没做完:
 `model.norm`(968×2048 的 RMSNorm,同样只喂给被丢弃的 `last_hidden_state`)还留着
 ~20–30 µs,没摘是因为训练的 joint 分支会直接调 `models[i].norm(...)`,改它会误伤训练路径;
 SigLIP 最后一层的同类审计**没做过**。
@@ -896,8 +984,8 @@ Welford 累加的切分就变,bf16 输出的最后几位就变,经 prefix KV →
 ### 第 1 条:两级结论
 
 * **代数等价 —— 全部成立。** 每一项改动都是恒等变换,没有一项算错。
-* **在出货的 `max-autotune` 路径上逐位相同 —— 只有下面这些**(前五行用的是上表里的强判据,
-  后三行判据偏弱,已如实标注):
+* **在出货的 `max-autotune` 路径上逐位相同 —— 只有下面这些**(每行的判据强弱按上表口径
+  如实标注,带 ⚠️ 的两行判据偏弱):
 
   | 项 | 判据 | 结果 |
   |---|---|---|
@@ -906,6 +994,8 @@ Welford 累加的切分就变,bf16 输出的最后几位就变,经 prefix KV →
   | 小 M 的 mm tile 候选 | `bitexact_denoise_gemms.py`,18 层 × 2 个 GEMM 的 sha256(真实权重、生产 stride) | ✅ PASS,含"两臂确实编出不同 tile"那一组 |
   | P·V 的 bmm 换 tile | `bitexact_denoise_bmms.py`,三进程 off/on/off、18 层、生产 shape + `repeat_kv` 广播 layout | ✅ PASS,同一 digest,两臂确实编出不同 tile |
   | 跳过 prefix LM 最后一层 | `bitexact_prefix_kv.py`,18 层 36 个 KV 张量的 sha256 | ✅ PASS **eager 36/36**;⚠️ 编译态只到"不比重编一次更糟",见 §「台账之后」 |
+  | 把步不变量从去噪循环里外提 | 核级:生产 shape 下 eager vs inductor 编出的 cos/sin、mask、position ids | ✅ PASS,`0.00e+00`(cos/sin 0 / 12800) |
+  | prefix LM 的 Q/K/V 并成一个 GEMM | `bitexact_prefix_qkv.py`,两臂 0 层 vs 17 层融合,36 个 KV 张量 + combined digest | ✅ PASS,36/36 `0.00e+00`,digest 一致 |
   | 删掉没人读的 timestep 条件计算 | 端到端 dump,两种 compile mode × 开关 on/off + 参考臂共 10 对 | ⚠️ 弱门,但 10/10 全过、且删的是确凿的死代码(`elif` 分支永不进入) |
   | 把整个去噪步捕获成一张 CUDA 图 | 端到端 dump(on vs off、on vs RLinf、off vs RLinf) | ⚠️ 弱门,`0.00e+00`;代数上无损(`flow_ode` 的 `x_t_std ≡ 0`,`sample_noise` 留在图外) |
   | **从 RLinf 剥离这件事本身** | 同进程双代码树逐级 digest(`noise0` → `prefix/kv` → 10 步 → `actions`) | ✅ PASS,24/24 digest 相同,`actions` 的 `max\|Δ\| = 0.00e+00`,0/300 |
@@ -1028,6 +1118,16 @@ engine.OpenPi0Inference
 import。边界的完整说明(以及这**没有**带来独立性的那一处)见
 [`EXTRACTION_NOTES.md`](EXTRACTION_NOTES.md) §8。
 
+### 这条边界被硬碰硬地验证过一次
+
+GPU 机容器里的 `site-packages/.../modeling_gemma.py` 曾在某个时点被替换成我们 fork 的
+旧版本,现已恢复成原厂文件(只保留 openpi 自己的 `use_adarms` 补丁)。恢复前后的 profile
+显示:去噪侧(stream 157)**44 个不同核的集合完全相同、每个核的 launch 数逐一相同、
+总 launch delta = 0** —— expert 侧从未依赖容器那份 fork,vendoring 边界是真实的。
+(这同时印证了 `pi05_infer::` 这个算子命名空间从没被 `rlinf::` 抢过。)prefix 侧的计时
+同样未变;**变了的是 prefix 的数值,而且是变好** —— [prefix QKV 融合](#s-prefix-qkv)
+的那次配对测量就是在恢复之后做的,这也是为什么它的绝对基线和别的 session 对不上。
+
 <a id="s-opnamespace"></a>
 
 ### 自定义算子的命名空间
@@ -1072,7 +1172,8 @@ PyTorch 路径。A/B 的每一个 OFF 臂都走的是这条降级路径,所以�
   CTA 变多单调变慢;那 ~20 % 的带宽空间要改结构才拿得到。
   ⛔ **P·V 的 `BLOCK_M=16` 已证伪**(§3.2b,慢 30 %);**Q·Kᵀ 不加候选**(库存冠军已在
   28 个配置的最优 1.6 % 内,且这个 shape 本来就不跨冷 autotune 比特稳定)。
-* **~1.0 ms/predict 的 per-step-invariant glue 还没外提**(§3.3)—— 这是目前剩下最大的一项。
+* **per-step-invariant glue 只外提了一部分**(§3.3):mask / position ids / RoPE cos-sin 已经
+  外提(−0.32 ms,kernels/step 217 → 190),`_get_timesteps` 的 `linspace` 等零碎还留着。
 * **去噪图路径上还留着一次死拷贝** `_copy_kv_into_static`(17.8 MB/predict,~0.03 ms)。
 * **不做**任何算法层改动、不做任何降精度:全部是代数等价的推理侧改动。⚠️ 但**不能**
   再说"逐比特保持模型输出" —— 三项优化在出货的编译路径上会产生 ~1 % 动作幅度的 bf16 级
@@ -1108,6 +1209,7 @@ PyTorch 路径。A/B 的每一个 OFF 臂都走的是这条降级路径,所以�
 | `pi05_infer/openpi_patched/` | 我们改过的两个 openpi 文件:`pi0_pytorch.py` + `gemma_pytorch.py` |
 | `pi05_infer/inductor_mm_tiles.py` | 给 M≤64 的两个 denoise GEMM 补小 `BLOCK_M` 候选(`RLINF_SMALL_M_MM`),以及给 P·V 的 attention bmm 补候选(`RLINF_SMALL_M_BMM`) |
 | `pi05_infer/prefix_last_layer.py` | 跳过 prefix LM 最后一层的死算(`RLINF_SKIP_LAST_LM_LAYER`;检测到 VLM value head 时自动不安装) |
+| `pi05_infer/prefix_qkv_fused.py` | prefix LM 前 17 层的 Q/K/V 并成一个 GEMM(`RLINF_FUSE_PREFIX_QKV`) |
 | `bench/standalone_infer_bench.py` | 延迟基准(e2e、分阶段、nsys、actions dump) |
 | `_extract_src/` | 抽取前的 RLinf 原始文件(未重构) |
 | `tools/isolation_check.py` | 证明 expert = `pi05_infer.gemma`,prefix = transformers |
@@ -1115,6 +1217,7 @@ PyTorch 路径。A/B 的每一个 OFF 臂都走的是这条降级路径,所以�
 | `tools/bitexact_denoise_gemms.py` | small-M mm 重 tile 的 GEMM 级 sha256 gate(§3.1) |
 | `tools/bitexact_denoise_bmms.py` | P·V bmm 重 tile 的核级 digest gate,三进程 off/on/off(§3.2b) |
 | `tools/bitexact_prefix_kv.py` | prefix 跳层的 KV 级 sha256 gate(18 层 36 张量) |
+| `tools/bitexact_prefix_qkv.py` | prefix QKV 融合的 KV 级 gate(0 层 vs 17 层融合,36 张量 + combined digest) |
 | `tools/bitexact_gate.sh` | 端到端 gate,四进程、强制空对照,不干净就判 INCONCLUSIVE |
 | `tools/bitexact_siglip_batch.py` | SigLIP 三路合批的同进程三级 A/B(「台账之前」) |
 | `tools/bitexact_extraction.py` | 「从 RLinf 剥离」的同进程双代码树逐级 digest |
