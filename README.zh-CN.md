@@ -3,9 +3,8 @@
 # pi05-infer
 
 **π0.5 动作专家(action expert)的独立 bs=1 推理引擎**,从
-[RLinf](https://github.com/RLinf/RLinf) 里抽出来,针对
-**RTX PRO 5000(GB202 / sm_120,Blackwell)** 做过一轮系统性优化。每一项都是代数等价变换 ——
-**不量化、不换采样器、不减去噪步数**。
+[RLinf](https://github.com/RLinf/RLinf) 里抽出来,针对 **RTX PRO 5000(GB202 / sm_120,
+Blackwell)** 做过一轮系统性优化。每一项都是代数等价变换 —— **不量化、不换采样器、不减去噪步数**。
 
 ## 成果
 
@@ -41,14 +40,9 @@ checkpoint `RLinf-Pi05-LIBERO-SFT`,torch 2.7.1+cu128,nsys 2026.1.2
 
 ## 限定
 
-1. **数值**:所有变换都是代数等价的,但**逐位一致性按编译路径分档** —— 有几项只在 eager 下
-   逐位相同,在出货的 `max-autotune` 路径上不成立。逐项分档见
-   [opt.md § 正确性](opt.md#s-correctness)。
-2. **对标**:图里那两条虚线是参考实现的位置;**均非配对测量,不作胜负判断**
-   ([opt.md § 与参考实现的对比](opt.md#s-baselines))。
-3. **prefix 跳最后一层是条件安装的** —— 检测到 VLM value head 就不装,**已发布的 19 份
-   pi0.5 PPO 配置里有 15 份命中这个条件**(拿不到这 −1.11 ms)。Kill switch
-   `RLINF_SKIP_LAST_LM_LAYER=0`。
+1. **数值** —— 所有变换都是代数等价的,但**逐位一致性按编译路径分档**(有几项只在 eager 下逐位相同,在出货的 `max-autotune` 上不成立):[opt.md § 正确性](opt.md#s-correctness)。
+2. **对标** —— 图里那两条虚线是参考实现的位置,**均非配对测量,不作胜负判断**([opt.md § 与参考实现的对比](opt.md#s-baselines))。
+3. **prefix 跳最后一层是条件安装的** —— 检测到 VLM value head 就不装,**已发布的 19 份 pi0.5 PPO 配置里有 15 份命中这个条件**(kill switch `RLINF_SKIP_LAST_LM_LAYER=0`)。
 
 ## 安装与运行
 
@@ -79,23 +73,21 @@ docker exec -w /path/to/pi05-infer pi05bench \
 python tools/isolation_check.py          # expert = pi05_infer.gemma,prefix = transformers
 
 # 核级 / GEMM 级 / KV 级 bit-exact gate
-python tools/bitgate.py                        # 两个 Triton 融合核
-python tools/bitexact_denoise_gemms.py         # small-M mm 重 tile
-python tools/bitexact_denoise_bmms.py          # P·V bmm 重 tile
-python tools/bitexact_prefix_kv.py             # prefix 跳最后一层
-python tools/bitexact_prefix_qkv.py            # prefix QKV 融合
+python tools/bitgate.py                  # 两个 Triton 融合核
+python tools/bitexact_denoise_gemms.py   # small-M mm 重 tile
+python tools/bitexact_denoise_bmms.py    # P·V bmm 重 tile
+python tools/bitexact_prefix_kv.py       # prefix 跳最后一层
+python tools/bitexact_prefix_qkv.py      # prefix QKV 融合
 
 # 编译路径上的结构性优化(冻结 prefix + 四进程空对照门),一个 stage 一条命令
-bash tools/run_bitexact_backfill.sh <stage>    # siglip|extraction|prefix|adarms|adarms_eager|qkv|kvstatic|attmask
+bash tools/run_bitexact_backfill.sh <stage>   # siglip|extraction|prefix|adarms|adarms_eager|qkv|kvstatic|attmask
 
-# 端到端数值 A/B,固定 seed —— ⚠️ 必须带空对照
+# 端到端数值 A/B —— ⚠️ 四进程,必须带空对照;两个同臂对照不干净就判 INCONCLUSIVE,绝不判 PASS
 GATE_OFF="RLINF_SMALL_M_MM=0" GATE_ON="RLINF_SMALL_M_MM=1" \
   tools/bitexact_gate.sh /tmp/gate_small_m --stage1 --iters 1 --warmup 4
 ```
 
-`bitexact_gate.sh` 跑四个进程(每臂两次),只有两个同臂空对照都干净时才报告跨臂比较,
-否则判 INCONCLUSIVE 而**绝不判 PASS**。每一项优化都带 kill switch,OFF 臂走的是被验证过的
-降级路径([opt.md](opt.md#s-fallback))。
+每一项优化都带 kill switch,OFF 臂走的是被验证过的降级路径([opt.md](opt.md#s-fallback))。
 
 <a id="r-layout"></a>
 
