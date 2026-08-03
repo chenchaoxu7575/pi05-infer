@@ -10,11 +10,11 @@ byte-identical to the checkout deployed in the `pi05bench` container.
 
 ---
 
-## 0. The environment claim in the task brief was wrong
+## 0. Which box a number came from -- two machines, one path prefix
 
-The brief said one working tree was "visible from BOTH the analysis box and inside
-the container". It is not -- the extraction ran across **two machines** whose trees
-happen to share a path prefix:
+Read this before comparing any two numbers in this file. The extraction ran across
+**two machines** whose working trees share a path prefix, so a path alone does not
+identify which copy a measurement was taken on:
 
 | namespace | role |
 |---|---|
@@ -22,21 +22,21 @@ happen to share a path prefix:
 | GPU box, host | a second copy of the tree |
 | GPU box, inside the benchmark container | a bind mount of the above |
 
-The container's path matches the brief, which is what the code needs. The two copies
-are kept in sync by `tar \| ssh`; the git history lives on the analysis box and is
-mirrored to the GPU box.
+The two copies are kept in sync by `tar \| ssh`; the git history lives on the analysis
+box and is mirrored to the GPU box.
 
-**This is why the notes below keep insisting on which box a number came from.** Nothing
-here is a general lesson -- it is the specific reason several early figures could not be
-reconciled: they were taken on different machines under the same-looking path.
+**This is why the notes below keep saying which box a number came from.** It is the
+specific reason several early figures could not be reconciled: they were taken on
+different machines under the same-looking path.
 
-Related: the GPU box's copy of `RLinf-pi05-nsys-profile` is **not a git repository** --
-it is an unpacked tree. Its `openpi_action_model.py` is byte-identical
-(md5 `86e98eeb580dc7a74b68db3fab1e3866`) to the analysis box's `cbb9d2fc`, so the two
-are the same code; but you cannot run `git` commands against the container copy.
-The analysis box's working tree additionally carries uncommitted WIP
-(`denoise_static_masks` + `max_token_len=48`, +49 lines) which is **not** in the
-container and therefore **not** part of the measured baseline or of this extraction.
+It is also why the byte-identity claim above rests on md5 rather than on a rev. The
+GPU box's copy of `RLinf-pi05-nsys-profile` is **not a git repository** -- it is an
+unpacked tree, so `git` cannot be run against it. Its `openpi_action_model.py` is
+md5 `86e98eeb580dc7a74b68db3fab1e3866`, identical to the analysis box's `cbb9d2fc`, so
+the two are the same code. The analysis box's working tree additionally carries
+uncommitted WIP (`denoise_static_masks` + `max_token_len=48`, +49 lines) which is
+**not** in the container and therefore **not** part of the measured baseline or of
+this extraction.
 
 ---
 
@@ -122,7 +122,7 @@ Beyond import rewrites, logging and dead-RL-code deletion, the following changed
 | `engine.py` `sample_actions` | the per-step `if idx == denoise_inds[0][idx]` sampler selection removed | always `flow_ode` in eval |
 | `engine.py` `sample_actions` / graph helpers | `compute_values` and `collect_nft_state` removed from signatures and from `_denoise_graph_signature` | the values they could take on the inference path are constant |
 | `engine.py` `_get_noise_level` | `sample_method` parameter and the annealing branch removed | annealing is train-only; the flow_ode early-return is unreachable because the only call site never passes `sample_method` |
-| `engine.py` `__init__` | `self.logger = get_logger()` -> module `logging.getLogger(__name__)` | brief |
+| `engine.py` `__init__` | `self.logger = get_logger()` -> module `logging.getLogger(__name__)` | `rlinf.utils.logging` is not a dependency of this package |
 | `engine.py` | `from rlinf.utils.utils import nvtx_range` -> `pi05_infer._vendored.nvtx` | `rlinf.utils.utils` imports `rlinf.scheduler.Worker` (Ray) at module scope |
 | `engine.py` | `PI0Pytorch, BasePolicy` base classes kept; `ForwardType` no longer imported | no dispatcher |
 | `builder.py` | `get_model(cfg: DictConfig)` -> `build_model(**kwargs)` with a thin `get_model(cfg)` shim | removes the omegaconf dependency from the core path without breaking the existing call shape |
@@ -163,15 +163,18 @@ reachable from the two retained data configs and was not vendored.
    `openpi.models.pi0_config.Pi0Config`, and subclasses `PI0Pytorch` -- since Stage 2
    the *vendored* `pi05_infer.openpi_patched.pi0_pytorch.PI0Pytorch`, which itself
    still imports `openpi.models.gemma` and `openpi.models_pytorch.preprocessing_pytorch`.
-   This is by design (the plan keeps openpi installed for `Observation`, transforms
-   and checkpoint loading).
+   This is by design: openpi stays installed, for `Observation`, transforms and
+   checkpoint loading.
 2. ~~**The patched site-packages.**~~ **Closed by Stage 2** for the expert; see section 8.
    The remaining site-packages dependency is openpi's own `transformers_replace`
    patch, which the **PaliGemma prefix** needs -- section 8.4.
 3. **`RLINF_DISABLE_OPENPI_TYPECHECK`.** The env-var gate that no-ops openpi's
    `@at.typecheck` is copied as-is, including its `RLINF_` prefix, so a single env var
    still controls both codebases. Default off in both, so both arms of the A/B pay the
-   same ~3.2 ms.
+   same cost -- which is what makes it harmless to the A/B, and is the only property
+   relied on here. **The size of that cost is unsettled: `engine.py` quotes ~2 ms and
+   this file quotes ~3.2 ms.** The two figures come from different sessions and it has
+   not been re-measured, so read it as "2-3 ms of pure CPU" until someone re-runs it.
 4. **`self.sample_actions = sample_actions_func` in `__init__`.** The rebind that
    stops `PI0Pytorch` from polymorphically calling the subclass method is preserved
    verbatim. Do not "clean it up".
@@ -247,33 +250,33 @@ Code-evident, noticed during the above and left alone. On the graph path
 `DynamicCache` that was captured as a graph input -- another 36 x 495 616 B ~ 17.8 MB/predict.
 But the captured expert forward reads `self.kv_static_k`, and touches `past_key_value` only
 for an `is not None` test, so nothing ever reads what that copy wrote; `prime_kv_static`
-(line 336, which runs *before* the refresh) is what actually supplies the fresh prefix. A
+-- called from `sample_actions` earlier in the same predict, *before*
+`_refresh_denoise_inputs` -- is what actually supplies the fresh prefix. A
 prior session measured this transfer at sub-0.1 ms, so the upside is small and deleting it
 would have to be re-validated against the graph capture.
 
 **Updated 2026-07-28:** `bench/standalone_infer_bench.py --stage1` now *does* call
 `capture_cuda_graph`, so this path is exercised and appears in
 the 2026-07-28 Stage-1 profile. The dead-copy observation stands and
-is still not acted on; the measured Stage-1 win (-0.93 ms/predict paired) is large enough
-that a sub-0.1 ms follow-up is not worth risking the capture over. See README
-"Measured 2026-07-28, `--stage1`".
+is still not acted on; the measured Stage-1 win (-0.93 ms/predict, paired) is large enough
+that a sub-0.1 ms follow-up is not worth risking the capture over.
 
-## 7. Not done (out of scope for this task)
+## 7. Not done (out of scope for this extraction)
 
-- **Plan Stage 2, second half** -- the *three-way merge* of `pi0_pytorch.py`
+- **The rest of the vendoring** -- the *three-way merge* of `pi0_pytorch.py`
   (patches / fork / runtime) and vendoring `model.py` + `array_typing.py`. Still not
   attempted: it changes behaviour (in particular the `array_typing` typecheck patch is
-  currently *not* applied and enabling it would move e2e by ~3.2 ms), which conflicts
-  with the "no behaviour change" gate. Do it as its own change with its own A/B.
-  (The *first* half of Stage 2 -- switching the package onto its own `pi05_infer/gemma`
-  and `pi05_infer/openpi_patched` -- is done; see section 8.)
-- **Plan Stage 3** -- rewiring RLinf's `openpi_action_model.py` onto this engine.
-  Explicitly excluded by the brief.
-- **Plan Stage 4** -- cleaning the container's 11 `.bak_*` files, restoring
-  site-packages to pristine, adding `pi05-infer` to `install.sh`. Stage 2 is the
-  prerequisite for the site-packages restore and is now in place, but the restore
-  itself was deliberately **not** done: the container's patched
-  `transformers/models/gemma/` is the reference arm of the A/B.
+  currently *not* applied, and enabling it would move e2e by the 2-3 ms of section 5 item 3),
+  which conflicts with the "no behaviour change" gate. Do it as its own change with its
+  own A/B. The *first* half -- switching the package onto its own `pi05_infer/gemma`
+  and `pi05_infer/openpi_patched` -- is done; see section 8.
+- **Rewiring RLinf's `openpi_action_model.py` onto this engine.** Out of scope: this
+  repository does not modify RLinf, and the RLinf path is needed unchanged as the
+  reference arm of the A/B.
+- **Restoring the benchmark container's site-packages to pristine** (cleaning its 11
+  `.bak_*` files, adding `pi05-infer` to `install.sh`). Section 8 is the prerequisite
+  and is now in place, but the restore itself was deliberately **not** done: the
+  container's patched `transformers/models/gemma/` is the reference arm of the A/B.
 
 ---
 
@@ -350,7 +353,7 @@ copy still does `from . import rlinf_fused_denoise`, registering `rlinf::gate_up
 and `rlinf::qkv_rope_kv`. Registering the same names from `pi05_infer/gemma` would
 raise; `modeling_gemma` catches that (`except Exception: _FUSED_OPS = None`), so the
 failure mode is **silent loss of both fusions** in whichever copy imports second --
-i.e. an unannounced perf regression, exactly the class of bug this task exists to
+i.e. an unannounced perf regression, exactly the class of bug this extraction exists to
 remove. The vendored ops are therefore registered as `pi05_infer::gate_up_geglu` /
 `pi05_infer::qkv_rope_kv`. Op *name*, kernel source, tile configs, guards, fallbacks
 and env-var names are unchanged; only the registration namespace differs, and the
@@ -402,19 +405,23 @@ Two consequences of leaving the container as-is, both harmless:
 Run on the GPU box, RTX PRO 5000 72 GB Blackwell (sm_120), 300 W cap, one job at a
 time, `pi05_turtle`, bs=1, 10 denoise steps, 3 x 128^2 cameras, `max-autotune`.
 
-**Isolation** (`tools/isolation_check.py`, prints every module path):
+**Isolation** (`tools/isolation_check.py`). It builds the real model the way
+`bench/standalone_infer_bench.py` does, prints the defining module of every module
+instance in both towers, and asserts them. What it checked and what it found:
 
-```
-expert ForCausalLM / GemmaModel / decoder layer / attention / MLP / RMSNorm
-                                           pi05_infer.gemma.modeling_gemma
-prefix GemmaModel / decoder layer / attention / MLP / RMSNorm
-                                           transformers.models.gemma.modeling_gemma
-prefix PaliGemma       transformers.models.paligemma.modeling_paligemma
-prefix vision tower    transformers.models.siglip.modeling_siglip
-expert _FUSED_OPS      <repo>/pi05_infer/gemma/rlinf_fused_denoise.py
-torch.ops.pi05_infer.{gate_up_geglu,qkv_rope_kv}   True
-ISOLATION_OK
-```
+| check | required | found |
+|---|---|---|
+| expert `ForCausalLM`, `GemmaModel`, decoder layer, attention, MLP, RMSNorm | a `pi05_infer.gemma.*` module | `pi05_infer.gemma.modeling_gemma` |
+| prefix `GemmaModel`, decoder layer, attention, MLP, RMSNorm | a `transformers.*` module | `transformers.models.gemma.modeling_gemma` |
+| prefix PaliGemma | printed, not asserted | `transformers.models.paligemma.modeling_paligemma` |
+| prefix vision tower | printed, not asserted | `transformers.models.siglip.modeling_siglip` |
+| expert `GemmaModel` exposes `build_adarms_stack`, `build_qkv_fused`, `prime_kv_static`, `clear_kv_static`, `refresh_derived_weights` | all five present | present |
+| expert `_FUSED_OPS.__file__` | must sit beside the vendored `modeling_gemma` | `<repo>/pi05_infer/gemma/rlinf_fused_denoise.py` |
+| `torch.ops.pi05_infer.gate_up_geglu`, `torch.ops.pi05_infer.qkv_rope_kv` | both registered | both `True` |
+| `transformers.models.gemma.modeling_gemma.{__file__, _FUSED_OPS}` | printed, not asserted -- shows whether the container still carries the old global overwrite | -- |
+
+The run ended `ISOLATION_OK`. The row set is deliberately described rather than pasted:
+its stdout changes whenever a check is added, and a pasted transcript goes stale silently.
 
 **Bit-exactness**
 
