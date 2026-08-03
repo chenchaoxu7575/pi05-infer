@@ -119,7 +119,7 @@ API 正是 openpi 的替换文件加进去的;在原版 upstream transformers �
 
 如果你手上有 RLinf benchmark 容器镜像,上面这些它里面都已经有了,**不需要重建 Docker**。
 
-### 安装
+### 安装与基准测试
 
 editable 安装,并且带 `--no-deps`,以免动到环境里的 torch / transformers / openpi 构建:
 

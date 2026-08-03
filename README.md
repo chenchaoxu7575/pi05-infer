@@ -135,7 +135,7 @@ the full boundary.
 If you have the RLinf benchmark container image, all of the above is already inside it and
 **no Docker rebuild is required**.
 
-### Install
+### Install and benchmark
 
 Install editable and with `--no-deps`, so the torch / transformers / openpi builds in the
 environment are left alone:
