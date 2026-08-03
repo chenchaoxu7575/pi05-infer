@@ -358,15 +358,15 @@ def derive_denoise(sqlite_path: str, n_steps: float = 120.0) -> None:
         # archived profiles still carry it.
         if name in ("_geglu_mm_kernel", "_swiglu_mm_kernel"):
             return "GeGLU: gate/up GEMM + gelu(g)*u  [fused]"
-        if name == "triton_tem_fused_mm_10":
+        if name == "triton_tem_fused_mm_6":
             return "down_proj GEMM"
-        if name == "triton_tem_fused_clone_mm_8":
+        if name == "triton_tem_fused_clone_mm_4":
             return "o_proj GEMM (+ transpose prologue)"
         if name == "_qkv_rope_kernel":
             return "QKV GEMM + RoPE -> static KV  [fused]"
-        if name == "triton_tem_fused_bmm_7":
+        if name == "triton_tem_fused_bmm_3":
             return "attention BMM  P*V"
-        if name == "triton_tem_fused_bmm_5":
+        if name == "triton_tem_fused_bmm_1":
             return "attention BMM  Q*K^T"
         if "softmax" in name:
             return "masked softmax"
@@ -460,7 +460,7 @@ def chart_denoise(mode: str) -> None:
         0.012,
         0.912,
         "nsys 2026.1.2, stream 157 (Stage-1 captured graph), "
-        "12 predicts x 10 steps - 10 steps = 11.85 ms of the 42.90 ms predict",
+        "",
         ha="left",
         fontsize=9,
         color=t["ink2"],

@@ -23,9 +23,7 @@
   <img alt="单个去噪步的逐核分解" src="docs/denoise_light.png">
 </picture>
 
-当前构建的逐核快照:[`docs/kernels/`](docs/kernels/)。
-968 token 的 prefix 占 GPU busy 的 71.7%,所以哪怕去噪循环免费,
-整个 predict 也只能快 1.39x。
+逐核快照:[`docs/kernels/`](docs/kernels/)。
 
 </details>
 
@@ -38,15 +36,13 @@ transformers   4.53.2, openpi 打过补丁的那份
 Python         3.11
 ```
 
-时延数字与 bit-exactness digest 都只对这张卡成立。
-
 ## 安装
 
 ```bash
 # 1. 一个打了 transformers_replace 补丁的 openpi 环境
 #    (openpi 自带的 install.sh 会做)
 
-# 2. 装本包,--no-deps 以免动到环境里的 torch
+# 2. 装本包
 pip install -e . --no-deps --no-build-isolation
 
 # 3. 一个 checkpoint
@@ -71,8 +67,6 @@ python bench/standalone_infer_bench.py --config-name pi05_turtle --iters 30
 
 ## 验证
 
-每一项优化都有一个 gate,跑两个臂并比对字节级 digest。
-
 ```bash
 export PI05_MODEL_PATH=/path/to/ckpt
 export CUDA_VISIBLE_DEVICES=0
@@ -89,20 +83,18 @@ python tools/bitexact_prefix_qkv.py # prefix QKV 融合
 ```
 pi05_infer/    引擎本体
   gemma/       vendoring 并改过的动作专家 Gemma + Triton 融合核
-  patches/     打在"我们不拥有的代码"上的优化 -- 全部可关
+  patches/     打在"我们不拥有的代码"上的优化
 bench/         延迟基准
 tools/         验证 gate 与测量驱动
 docs/          那两张图,以及重新生成它们的 make_charts.py
   kernels/     去噪步的逐核快照
-_extract_src/  抽取前的 RLinf 原始文件,留着让整个抽取可以用 diff 审计
+_extract_src/  抽取前的 RLinf 原始文件
 ```
 
 ## 延伸阅读
 
-* [`EXTRACTION_NOTES.md`](EXTRACTION_NOTES.md) -- 从 RLinf 抽取的边界与遗留项。
+* [`EXTRACTION_NOTES.md`](EXTRACTION_NOTES.md) -- 从 RLinf 抽取的边界。
 * [`tools/README.md`](tools/README.md) -- 哪些脚本可移植,哪些不可。
-
-详细的优化记录尚未发布。
 
 ## 许可证
 
