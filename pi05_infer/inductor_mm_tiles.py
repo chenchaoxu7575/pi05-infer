@@ -28,13 +28,35 @@ RTX PRO 5000 Blackwell (sm_120, 110 SM), nsys 2026.1.2, 12 predicts::
     denoise stream busy  11.48 -> 10.55 ms/predict; kernel counts unchanged
     e2e paired A/B, SM clock held equal: -0.88 ms/predict
 
-**Bit-exactness.**  ``BLOCK_K`` is the only tile parameter that changes the
-order of the fp32 accumulation over K; ``BLOCK_M``/``BLOCK_N``/``num_warps``/
-``num_stages`` only change which CTA owns which output element, not how that
-element is computed.  Every candidate appended here therefore pins
-``BLOCK_K = 128`` -- the value inductor's own champion already uses for both
-shapes -- so whichever candidate wins produces bit-identical output.  All 15
-configs in the sweep above returned byte-identical results.
+**Bit-exactness.**  An earlier version of this module claimed that ``BLOCK_K``
+is the only tile parameter that changes the fp32 accumulation order and that
+``BLOCK_M``/``BLOCK_N``/``num_warps``/``num_stages`` are numerically inert.
+**Measurement refuted that, and in the dangerous direction** (2026-07-31, real
+checkpoint weights, 18 layers x 2 ops, 3 seeds, 5.53 M bf16 elements)::
+
+    down_proj (N=1024, K=4096), reference digest 2a25a0b5... :
+        BLOCK_K 128 -> 256 (and -> 64, -> 512)   bit-identical
+        num_stages 5 -> 4 at BLOCK_K=128         DIFFERS: 18/36 outputs,
+                                                 359732/921600 elements,
+                                                 max|d| 6.25e-2
+        num_stages 5 -> 3 at BLOCK_K=128         same difference
+        num_stages 4 or 3 at BLOCK_K=256         bit-identical
+    (BLOCK_M/BLOCK_N are inert: (32,32,128,4,4) and (16,64,128,4,4) produce
+     byte-identical output -- they differ only in stages from the reference.)
+
+So the safe set is **not** derivable from any single parameter: it is a property
+of the (shape, BLOCK_K, num_stages) combination and has to be measured.  The
+list below therefore carries **only entries whose output digest was verified
+equal to the shipping reference** for both shapes; the old
+``assert BLOCK_K == 128`` gate was blocking the safe direction while waving the
+unsafe one through.  ``o_proj`` (N=1024, K=2048) did not flip on any config
+tested, so the constraint above is driven entirely by ``down_proj``.
+
+⚠️  **"Bit-exact relative to what."**  Unpatched stock inductor is *itself* not
+stable across fresh autotunes on ``mm(50x4096, 4096x1024)``: cuBLAS ``mm``
+(0.0202 ms) and the Triton template (0.0204 ms) tie, and 1 of 4 cold caches
+picked cuBLAS -- which has its own digest.  The reference this module preserves
+is the Triton champion the shipped patch already selects.
 
 **Scope.**  The patch replaces a name in ``torch._inductor.kernel.mm``, so it is
 process-global: any *other* model compiled in the same process whose GEMM also
@@ -107,6 +129,7 @@ Tuning: ``RLINF_SMALL_M_BMM_SHAPES="NxK@BK;..."``,
 
 import itertools
 import os
+import warnings
 from typing import Iterable, Optional
 
 __all__ = [
@@ -116,24 +139,25 @@ __all__ = [
     "small_m_bmm_enabled",
 ]
 
-# (BLOCK_M, BLOCK_N, BLOCK_K, num_stages, num_warps). BLOCK_K MUST stay 128 for
-# every entry -- see the bit-exactness note above.
+# (BLOCK_M, BLOCK_N, BLOCK_K, num_stages, num_warps).
 #
-# Deliberately NOT extended with BLOCK_N=32 / num_warps=4 entries. The theory
-# that "(16,32,128,*,2) only loses because it is stuck at 2 warps, so give it 4
-# and reach 128 CTAs" is wrong twice over:
-#   * filtered_configs clamps num_warps to BLOCK_M*BLOCK_N//256, which is 2 for
-#     a 16x32 tile, so (16,32,128,4,4) is silently rewritten to the entry that
-#     is already in this list;
-#   * forcing 4 warps past that clamp changes nothing anyway -- measured 14.479
-#     us at 2 warps and 14.479 us at 4 (down_proj, 2092 MHz, kernel time).
-# The 128-CTA corner is reachable today and is simply slower: down_proj 14.48 us
-# at BN=32 versus 13.90 us at BN=64, o_proj 9.18 versus 8.56.
+# EVERY entry here is digest-verified equal to the shipping reference for BOTH
+# shapes -- see the bit-exactness note above.  Do not add a candidate without
+# re-running that check; "it only changes BLOCK_M/BLOCK_N/warps" is not a proof.
+#
+# Three entries were REMOVED on 2026-07-31 because they flip down_proj's output
+# bits -- (16,64,128,4,4), (16,64,128,3,4), (16,32,128,4,2), all num_stages<5 at
+# BLOCK_K=128.  They shipped for weeks and stayed bit-exact only because
+# autotune happened to keep picking num_stages=5; (16,64,128,4,4) is ~1% faster
+# than that champion, so a different autotune draw would have been both faster
+# and silently non-reproducible.
+#
+# Deliberately NOT extended with the BLOCK_N=32 / num_warps=4 corner: filtered_
+# configs clamps num_warps to BLOCK_M*BLOCK_N//256 (= 2 for a 16x32 tile), and
+# forcing 4 warps past that clamp changes nothing (14.479 us either way).  The
+# 128-CTA corner is reachable today and is simply slower.
 _DEFAULT_CFGS = (
     (16, 64, 128, 5, 4),
-    (16, 64, 128, 4, 4),
-    (16, 64, 128, 3, 4),
-    (16, 32, 128, 4, 2),
     (32, 32, 128, 5, 4),
 )
 
@@ -143,7 +167,19 @@ _DEFAULT_CFGS = (
 # its kernel selection (and hence its output bits) cannot move.
 _DEFAULT_SHAPES = ((1024, 2048), (1024, 4096))
 
-_REQUIRED_BLOCK_K = 128
+# Digest-verified safe for both mm shapes (see the bit-exactness note). Anything
+# outside this set supplied via RLINF_SMALL_M_MM_CFGS is allowed -- the env hook
+# exists precisely to explore -- but it warns, because safety here is measured,
+# not derivable from the tile parameters.
+_VERIFIED_CFGS = frozenset(
+    {
+        (32, 32, 256, 4, 4),
+        (32, 32, 256, 3, 4),
+        (16, 64, 128, 5, 4),
+        (32, 32, 128, 5, 4),
+        (64, 32, 128, 5, 4),  # stock champion
+    }
+)
 
 # ---- attention bmm ----------------------------------------------------------
 # (N, K) -> BLOCK_K that the *stock* champion for that shape already uses. Every
@@ -193,11 +229,17 @@ def _parse_cfgs(raw: Optional[str]) -> tuple:
         assert len(cfg) == 5, (
             f"RLINF_SMALL_M_MM_CFGS entries must be 'BM,BN,BK,stages,warps', got {cfg}"
         )
-        assert cfg[2] == _REQUIRED_BLOCK_K, (
-            f"RLINF_SMALL_M_MM_CFGS: BLOCK_K must be {_REQUIRED_BLOCK_K} (it is the "
-            f"only tile parameter that changes the fp32 reduction order over K, so "
-            f"any other value silently breaks bit-exactness), got {cfg[2]} in {cfg}"
-        )
+        if cfg not in _VERIFIED_CFGS:
+            warnings.warn(
+                f"RLINF_SMALL_M_MM_CFGS: {cfg} is not in the digest-verified set "
+                f"{sorted(_VERIFIED_CFGS)}. Bit-exactness of this tile is UNKNOWN -- "
+                f"num_stages is known to change down_proj's fp32 accumulation order "
+                f"at BLOCK_K=128 (18/36 outputs, max|d| 6.25e-2). Run "
+                f"tools/bitexact_denoise_gemms.py with and without this config and "
+                f"compare the digests before trusting any numerical-parity claim.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
     return cfgs
 
 
