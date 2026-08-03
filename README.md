@@ -138,18 +138,39 @@ the eager denoise loop with no symptom other than the runtime.
 
 ```bash
 export PI05_MODEL_PATH=/path/to/RLinf-Pi05-LIBERO-SFT
+export CUDA_VISIBLE_DEVICES=0     # run_bitexact_backfill.sh otherwise defaults to GPU 1
 
 python tools/isolation_check.py          # expert = pi05_infer.gemma, prefix = transformers
 
-# kernel / GEMM / KV-level bit-exactness gates
+# Same-process gates: one command runs both arms and prints both digests.
 python tools/bitgate.py                  # the two Triton fusion kernels
-python tools/bitexact_denoise_gemms.py   # small-M mm retile
-python tools/bitexact_denoise_bmms.py    # attention bmm retile + the Q*K^T tile pin
-python tools/bitexact_prefix_kv.py       # prefix last-layer skip
 python tools/bitexact_prefix_qkv.py      # fused prefix QKV
 
-# structural optimizations on the compiled path (frozen prefix + four-process control gate)
-bash tools/run_bitexact_backfill.sh <stage>   # siglip|extraction|prefix|adarms|adarms_eager|qkv|kvstatic|attmask
+# One process per arm, sharing one inductor cache dir -- separate caches let autotune
+# re-pick untouched shapes and have produced a sign-flipped result. Digests must match.
+TORCHINDUCTOR_CACHE_DIR=/tmp/ti_be RLINF_SMALL_M_MM=0 python tools/bitexact_denoise_gemms.py
+TORCHINDUCTOR_CACHE_DIR=/tmp/ti_be RLINF_SMALL_M_MM=1 python tools/bitexact_denoise_gemms.py
+
+TORCHINDUCTOR_CACHE_DIR=/tmp/ti_be RLINF_SMALL_M_BMM=0 python tools/bitexact_denoise_bmms.py
+TORCHINDUCTOR_CACHE_DIR=/tmp/ti_be RLINF_SMALL_M_BMM=1 python tools/bitexact_denoise_bmms.py
+
+# Prefix last-layer skip: two arms write JSON, a third call compares them.
+TORCHINDUCTOR_CACHE_DIR=/tmp/ti_kv RLINF_SKIP_LAST_LM_LAYER=0 \
+  python tools/bitexact_prefix_kv.py --out off.json
+TORCHINDUCTOR_CACHE_DIR=/tmp/ti_kv RLINF_SKIP_LAST_LM_LAYER=1 \
+  python tools/bitexact_prefix_kv.py --out on.json
+python tools/bitexact_prefix_kv.py --compare off.json on.json
+
+# Structural optimizations on the compiled path (frozen prefix + four-process control
+# gate). One stage per invocation, and `prefix` must run first: it writes the frozen
+# prefix that adarms / adarms_eager / qkv / kvstatic replay. Running one of those on
+# its own silently produces a weaker gate rather than an error.
+bash tools/run_bitexact_backfill.sh prefix
+bash tools/run_bitexact_backfill.sh adarms      # then adarms_eager | qkv | kvstatic
+bash tools/run_bitexact_backfill.sh siglip      # independent of the frozen prefix
+bash tools/run_bitexact_backfill.sh attmask     # ditto -- it lives inside the prefix
+RLINF_ROOT=/path/to/RLinf \
+  bash tools/run_bitexact_backfill.sh extraction   # needs a second, RLinf checkout
 
 # end-to-end numerical A/B -- WARNING: four processes, always with an empty control; declares
 # INCONCLUSIVE (never PASS) unless both same-arm controls come back clean
@@ -157,7 +178,9 @@ GATE_OFF="RLINF_SMALL_M_MM=0" GATE_ON="RLINF_SMALL_M_MM=1" \
   tools/bitexact_gate.sh /tmp/gate_small_m --stage1 --iters 1 --warmup 4
 ```
 
-Each gate runs both arms and prints a digest; the two must match.
+`bitgate.py` and `bitexact_prefix_qkv.py` run both arms inside one process and print both
+digests. The rest need one process per arm, which is what the pinned cache dir is for.
+Either way the two digests must match.
 
 Most optimizations carry an `RLINF_*=0` kill switch, and a gate's OFF arm exercises that
 fallback path. Four do not: the adaRMS precompute, the action expert's fused QKV, the

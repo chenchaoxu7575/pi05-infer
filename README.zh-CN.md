@@ -123,25 +123,46 @@ shape signature 对不上时会退回 eager 去噪循环,**除了运行时间之
 
 ```bash
 export PI05_MODEL_PATH=/path/to/RLinf-Pi05-LIBERO-SFT
+export CUDA_VISIBLE_DEVICES=0     # 否则 run_bitexact_backfill.sh 默认去用 GPU 1
 
 python tools/isolation_check.py          # expert = pi05_infer.gemma,prefix = transformers
 
-# 核级 / GEMM 级 / KV 级 bit-exact gate
+# 同进程 gate:一条命令跑完两个臂,并打印两个 digest
 python tools/bitgate.py                  # 两个 Triton 融合核
-python tools/bitexact_denoise_gemms.py   # small-M mm 重 tile
-python tools/bitexact_denoise_bmms.py    # attention bmm 重 tile + Q*K^T tile 钉死
-python tools/bitexact_prefix_kv.py       # prefix 跳最后一层
 python tools/bitexact_prefix_qkv.py      # prefix QKV 融合
 
-# 编译路径上的结构性优化(冻结 prefix + 四进程空对照门),一个 stage 一条命令
-bash tools/run_bitexact_backfill.sh <stage>   # siglip|extraction|prefix|adarms|adarms_eager|qkv|kvstatic|attmask
+# 一个臂一个进程,两个臂共用同一个 inductor cache 目录 -- 分开的 cache 会让 autotune
+# 对没动过的 shape 重新选型,历史上出过符号相反的结果。两个 digest 必须相同。
+TORCHINDUCTOR_CACHE_DIR=/tmp/ti_be RLINF_SMALL_M_MM=0 python tools/bitexact_denoise_gemms.py
+TORCHINDUCTOR_CACHE_DIR=/tmp/ti_be RLINF_SMALL_M_MM=1 python tools/bitexact_denoise_gemms.py
+
+TORCHINDUCTOR_CACHE_DIR=/tmp/ti_be RLINF_SMALL_M_BMM=0 python tools/bitexact_denoise_bmms.py
+TORCHINDUCTOR_CACHE_DIR=/tmp/ti_be RLINF_SMALL_M_BMM=1 python tools/bitexact_denoise_bmms.py
+
+# prefix 跳最后一层:两个臂各写一份 JSON,再用第三条命令比对
+TORCHINDUCTOR_CACHE_DIR=/tmp/ti_kv RLINF_SKIP_LAST_LM_LAYER=0 \
+  python tools/bitexact_prefix_kv.py --out off.json
+TORCHINDUCTOR_CACHE_DIR=/tmp/ti_kv RLINF_SKIP_LAST_LM_LAYER=1 \
+  python tools/bitexact_prefix_kv.py --out on.json
+python tools/bitexact_prefix_kv.py --compare off.json on.json
+
+# 编译路径上的结构性优化(冻结 prefix + 四进程空对照门):一次一个 stage,并且 `prefix`
+# 必须先跑 -- 它写出的冻结 prefix 是 adarms / adarms_eager / qkv / kvstatic 要回放的。
+# 先跑后面那几个不会报错,只会安静地得到一个更弱的 gate。
+bash tools/run_bitexact_backfill.sh prefix
+bash tools/run_bitexact_backfill.sh adarms      # 然后 adarms_eager | qkv | kvstatic
+bash tools/run_bitexact_backfill.sh siglip      # 与冻结 prefix 无关
+bash tools/run_bitexact_backfill.sh attmask     # 同上 -- 它本身就在 prefix 里面
+RLINF_ROOT=/path/to/RLinf \
+  bash tools/run_bitexact_backfill.sh extraction   # 需要另外一份 RLinf checkout
 
 # 端到端数值 A/B -- WARNING: 四进程,必须带空对照;两个同臂对照不干净就判 INCONCLUSIVE,绝不判 PASS
 GATE_OFF="RLINF_SMALL_M_MM=0" GATE_ON="RLINF_SMALL_M_MM=1" \
   tools/bitexact_gate.sh /tmp/gate_small_m --stage1 --iters 1 --warmup 4
 ```
 
-每个 gate 都跑两个臂并各打印一个 digest,两个必须相同。
+`bitgate.py` 和 `bitexact_prefix_qkv.py` 在同一个进程里跑完两个臂,自己打印两个 digest;
+其余的每个臂一个进程,共用 cache 目录就是为了这个。两种情况下,两个 digest 都必须相同。
 
 大部分优化带 `RLINF_*=0` kill switch,gate 的 OFF 臂走的就是那条降级路径。有四项没有:
 adaRMS 预计算、动作专家内部融合的 QKV、静态 prefix-KV 缓冲、以及在 GPU 上构造的
