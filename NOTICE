@@ -5,7 +5,7 @@ This product includes software developed by third parties, redistributed
 under the Apache License, Version 2.0 (see LICENSE).
 
 ================================================================================
-Vendored third-party code and modifications
+Provenance: vendored code and per-file modifications
 ================================================================================
 
 1. pi05_infer/gemma/modeling_gemma.py
@@ -49,6 +49,38 @@ Vendored third-party code and modifications
    Derived from RLinf (https://github.com/RLinf/RLinf), Apache-2.0.
    `engine.py` is an extraction of the pure-inference path from RLinf's
    `rlinf/models/embodiment/openpi/openpi_action_model.py`, with the
-   reinforcement-learning instrumentation removed.
+   reinforcement-learning instrumentation removed. `cuda_graph.py`,
+   `dataconfig/policies/{turtle,libero}_policy.py` and
+   `dataconfig/policies/__init__.py` are byte-identical to their RLinf
+   originals; the other files in this group differ only as recorded in
+   EXTRACTION_NOTES.md sections 2 to 4.
+
+5. bench/standalone_infer_bench.py
+   Derived from RLinf, Apache-2.0: adapted from RLinf's
+   `benchmarks/pi05_infer/standalone_infer_bench.py` at rev `cbb9d2fc`.
+   Only the model-construction seam changed -- the timing harness, dummy
+   observation generator and phase decomposition are unchanged. Two optional
+   flags (`--dump-actions`, `--clocks-json`) were added; both are no-ops
+   unless passed.
+
+6. _extract_src/{openpi_action_model.py, standalone_infer_bench.py}
+   Verbatim, unmodified copies of RLinf sources at rev `cbb9d2fc`, Apache-2.0,
+   kept only as the material that `pi05_infer/engine.py` and `bench/` were
+   extracted from. Not part of the installed package and not importable; md5
+   checksums are in `_extract_src/README.md`.
+
+7. pi05_infer/patches/{__init__.py, inductor_mm_tiles.py, prefix_last_layer.py,
+   prefix_qkv_fused.py}
+   New code written for this project: optimizations applied at runtime to
+   installed libraries rather than by forking them -- extra small-M tile
+   candidates for torch inductor's `mm`/`bmm` templates, and two instance-level
+   `forward` swaps on the stock-transformers PaliGemma prefix.
+
+================================================================================
+
+Everything not listed above is new code written for this project: `tools/`,
+`docs/`, `pyproject.toml`, and the remaining package `__init__.py` files
+(`pi05_infer/`, `pi05_infer/gemma/`, `pi05_infer/openpi_patched/`,
+`pi05_infer/_vendored/`).
 
 ================================================================================
