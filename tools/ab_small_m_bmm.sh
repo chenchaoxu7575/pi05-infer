@@ -4,8 +4,15 @@
 # Paired A/B of the extra tile candidate for the P.V attention BMM
 # (pi05_infer/inductor_mm_tiles.py::install_small_m_bmm_configs).
 #
-#   arm "off" : RLINF_SMALL_M_BMM=0  -- stock inductor bmm autotune space
-#   arm "on"  : RLINF_SMALL_M_BMM=1  -- + BM32/BN64/BK128 for bmm(8x50x1018, 8x1018x256)
+#   arm "off" : $AB_VAR=0        arm "on" : $AB_VAR=1
+#
+# AB_VAR defaults to RLINF_SMALL_M_BMM (stock autotune space vs + BM32/BN64/BK128
+# for bmm(8x50x1018, 8x1018x256)). Set AB_VAR=RLINF_SMALL_M_BMM_PIN to A/B the
+# Q.K^T tile pin instead -- that one is worth measuring not for its mean but for
+# its variance: the "off" arm re-draws a tile per cold compile and the draw spans
+# 20.2%, so the two arms differ in spread as much as in centre.
+#
+# Requires $PI05_MODEL_PATH (or --model-path in the extra args).
 #
 # Three things this driver does that a naive loop does not, each of which has
 # produced a wrong answer on this workload before:
@@ -33,6 +40,7 @@ PY=${PY:-/opt/venv/openpi/bin/python}
 TI=${TORCHINDUCTOR_CACHE_DIR:-/tmp/ti_ab_small_m_bmm}
 LOCK=${GPU_LOCK:-/tmp/pi05_gpu_timing.lock}
 CLK=${AB_LOCK_CLOCK:-2100}
+AB_VAR=${AB_VAR:-RLINF_SMALL_M_BMM}
 mkdir -p "$D" "$TI"
 cd "$REPO" || exit 1
 export CUDA_VISIBLE_DEVICES=0
@@ -44,7 +52,7 @@ trap 'nvidia-smi -i 0 -rgc >/dev/null 2>&1' EXIT
 run() { # arm round
   local sw=0
   [ "$1" = "on" ] && sw=1
-  RLINF_SMALL_M_BMM=$sw TORCHINDUCTOR_CACHE_DIR="$TI" \
+  env "$AB_VAR=$sw" TORCHINDUCTOR_CACHE_DIR="$TI" \
     $PY -u bench/standalone_infer_bench.py --iters "$ITERS" \
     --clocks-json "$D/r${2}_${1}.json" ${EXTRA[@]+"${EXTRA[@]}"} \
     >"$D/r${2}_${1}.log" 2>&1

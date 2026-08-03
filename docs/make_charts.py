@@ -323,6 +323,35 @@ FLUX_MS = 44.9
 FLUX_US, FLUX_KERN = 1419.0, 205
 
 
+# --------------------------------------------------------------------------
+# Provenance stamp
+# --------------------------------------------------------------------------
+# Each chart is a snapshot of a specific commit, and main has moved past all
+# three. They are deliberately NOT redrawn against current main: the ledger is a
+# paired chain measured one arm at a time, and later work was measured on
+# different baselines, so grafting today's numbers onto these bars would create
+# exactly the chained-different-rulers error the charts exist to avoid. Stamp
+# what each one is instead, and let the README carry the current absolute.
+STAMPS = {
+    "ledger": "chart state: pi05-infer @ 62aa78e\n"
+              "rows measured 2026-07-11..07-28\n"
+              "main has moved since -- see README for its e2e",
+    "denoise": "chart state: pi05-infer @ 62aa78e\n"
+               "profiled 2026-07-28, nsys 2026.1.2, 12 predicts\n"
+               "main is now 190 kernels/step -- not re-derived",
+    "phases": "chart state: pi05-infer @ 62aa78e\n"
+              "profiled 2026-07-28, nsys 2026.1.2, 12 predicts\n"
+              "the split moves as either side changes",
+}
+
+
+def _stamp(fig, t: dict, which: str) -> None:
+    # Top-right, three short lines: the bottom edge of all three figures is
+    # already taken by a caveat, and one long line collides with the title.
+    fig.text(0.988, 0.992, STAMPS[which], ha="right", va="top", linespacing=1.5,
+             fontsize=6.6, color=t["muted"], style="italic")
+
+
 def _peer_key(ax, t, x, y, color, ls, title, sub, dash, pad, dy):
     """One entry of the in-axes peer key: a short dash + two lines of text.
 
@@ -385,9 +414,16 @@ def chart_ledger(mode: str) -> None:
     fig.suptitle("pi0.5 action expert, bs=1: 52.60 -> 42.90 ms  (-9.70 ms, -18.4%)",
                  x=0.012, y=0.988, ha="left", fontsize=14, fontweight="bold",
                  color=t["ink"])
+    # This line used to read "every ledger step bit-exact against the unoptimised
+    # path (max|delta| = 0.00e+00)". That is a stronger claim than the evidence
+    # supports and the repo's own rules forbid it: bit-identity here is tiered by
+    # compile path -- some items are bit-identical under eager but not under the
+    # shipping max-autotune, whose own kernel choice is not stable across cold
+    # autotunes. What is true of every row without qualification is that the
+    # transform is algebraically equivalent. Say that.
     fig.text(0.012, 0.961,
-             "every ledger step bit-exact against the unoptimised path "
-             "(max|delta| = 0.00e+00) - no quantization, no fewer denoise steps",
+             "every ledger step is an algebraically equivalent transform - no quantization, "
+             "no change of sampler, no fewer denoise steps",
              ha="left", fontsize=9, color=t["ink2"])
 
     # ---------------- panel 1: prehistory, absolute bars -------------------
@@ -510,6 +546,7 @@ def chart_ledger(mode: str) -> None:
              "RTX PRO 5000 (GB202/sm_120), 300 W cap - K=10 Euler steps, 968 prefix tokens, "
              "chunk 50, bf16 - panels 2 and 3 are zoomed waterfalls: bars encode deltas, not totals",
              ha="left", fontsize=7.5, color=t["muted"])
+    _stamp(fig, t, "ledger")
     fig.savefig(OUT / f"ledger_{mode}.png")
     plt.close(fig)
 
@@ -632,13 +669,14 @@ def chart_denoise(mode: str) -> None:
     fig.suptitle("Where a denoise step goes: 1185.0 us, 217 kernels", x=0.012,
                  ha="left", fontsize=14, fontweight="bold", color=t["ink"])
     fig.text(0.012, 0.912,
-             "current build, nsys 2026.1.2, stream 157 (Stage-1 captured graph), "
+             "nsys 2026.1.2, stream 157 (Stage-1 captured graph), "
              "12 predicts x 10 steps - 10 steps = 11.85 ms of the 42.90 ms predict",
              ha="left", fontsize=9, color=t["ink2"])
     fig.text(0.012, 0.013,
              "the 37 adaRMS dense(cond) projections that used to cost 395 us/step here "
              "(triton_per_fused_addmm_0, 300 instances) are gone - 0 instances",
              ha="left", fontsize=7.5, color=t["muted"])
+    _stamp(fig, t, "denoise")
     fig.savefig(OUT / f"denoise_{mode}.png")
     plt.close(fig)
 
@@ -714,6 +752,7 @@ def chart_phases(mode: str) -> None:
              "the 968-token prefix is 71.7% - even a free denoise loop caps the "
              "whole-predict speedup at 1.39x",
              ha="left", fontsize=9, color=t["ink2"])
+    _stamp(fig, t, "phases")
     fig.savefig(OUT / f"phases_{mode}.png")
     plt.close(fig)
 
