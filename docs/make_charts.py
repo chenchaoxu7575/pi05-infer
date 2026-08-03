@@ -147,92 +147,121 @@ def _rounded_hbar(ax, y, x0, x1, height, color, radius_pt=4.0, zorder=3):
 
 
 # --------------------------------------------------------------------------
-# Chart 1 - improvement over the original baseline
+# Chart 1 - eager to current, one ruler
 # --------------------------------------------------------------------------
-# Baseline is the extracted model as it arrived: torch.compile max-autotune, none
-# of this work applied. e2e = predict_action_batch, plain CPU wall clock, 30 iters
-# after 8 warmups, serialized, RTX PRO 5000 at its 300 W default.
+# Five absolutes measured in one session, unlocked plain wall clock, so the
+# deltas are differences of consecutive absolutes and chain by construction.
 #
-# Each ledger row is its own paired A/B against the row above it, so the deltas
-# are additive; the three category totals are sums of those deltas and add to 9.70.
-BASE, LEDGER_END, NOW = 52.60, 42.90, 40.50
+#   EAGER   --no-compile
+#   BASE    torch.compile max-autotune, all twelve optimizations off
+#   C1      + CPU overhead
+#   C2      + denoise-step work removed
+#   C3      + kernel fusion & optimization   (= shipping defaults)
+#
+# None is None -> the chart renders that value as a placeholder.
+EAGER = None
+BASE = None
+C1 = None
+C2 = None
+C3 = None
 
 CATS = [
     (
         "CPU overhead",
-        3.44,
         [
             "capture one flow_ode step as a graph, replay it for every step",
+            "hoist the step-invariant mask / position ids / rotary table",
             "prefix KV into a static buffer",
             "attention mask built on device",
-            "extract to a standalone package",
         ],
     ),
     (
         "denoise-step work removed",
-        3.09,
         [
             "precompute the adaRMS modulation table, 37 projections -> 1 gather",
             "drop the timestep conditioning nothing reads",
+            "drop the prefix LM's last-layer tail",
         ],
     ),
     (
         "kernel fusion & optimization",
-        3.17,
         [
             "GeGLU and RoPE fused into the GEMM epilogue",
-            "Q/K/V into a single GEMM",
+            "Q/K/V into a single GEMM, expert and prefix",
+            "retuned down_proj / o_proj tiles, pinned the Q*K^T tile",
         ],
     ),
 ]
 
-SINCE = (
-    "since then, each on its own baseline: fused prefix QKV, retiled "
-    "down_proj / o_proj, pinned the Q*K^T tile"
-)
+
+def _ms(v):
+    return "--.--" if v is None else f"{v:.2f}"
 
 
 def chart_ledger(mode: str) -> None:
+    """Descending waterfall: each category picks up where the previous ended."""
     t = THEMES[mode]
     _style(t)
     colors = [t["s1"], t["s2"], t["s3"]]
-    span = BASE - LEDGER_END
 
-    fig = plt.figure(figsize=(10.5, 5.6), dpi=200)
-    ax = fig.add_axes((0.035, 0.660, 0.930, 0.090))
-    ax.set_xlim(0, span)
-    ax.set_ylim(-0.5, 0.5)
-    ax.axis("off")
+    stages = [BASE, C1, C2, C3]
+    have = all(v is not None for v in stages)
+    # placeholder geometry so the layout is reviewable before the data lands
+    geo = stages if have else [50.0, 47.0, 45.2, 43.0]
 
-    x = 0.0
-    for (label, ms, _items), c in zip(CATS, colors):
-        _rounded_hbar(ax, 0, x, x + ms, 0.95, c, radius_pt=3.0)
+    fig = plt.figure(figsize=(10.5, 6.4), dpi=200)
+    ax = fig.add_axes((0.345, 0.120, 0.620, 0.560))
+    lo = geo[3] - (geo[0] - geo[3]) * 0.10
+    hi = geo[0] + (geo[0] - geo[3]) * 0.06
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(-0.6, 2.6)
+    _chrome(ax, t)
+    ax.set_yticks([])
+    ax.set_xlabel("end-to-end predict_action_batch (ms)", fontsize=9.5)
+
+    for i, ((label, items), c) in enumerate(zip(CATS, colors)):
+        y = 2 - i
+        left, right = geo[i + 1], geo[i]
+        _rounded_hbar(ax, y, left, right, 0.46, c, radius_pt=3.0)
         ax.text(
-            x + ms / 2,
-            0.06,
-            f"-{ms:.2f}",
-            ha="center",
+            left - (hi - lo) * 0.012,
+            y,
+            f"-{_ms(right - left) if have else '--.--'}",
+            ha="right",
             va="center",
-            fontsize=13,
+            fontsize=11.5,
             fontweight="bold",
-            color=t["surface"],
+            color=t["ink"],
         )
         ax.text(
-            x + ms / 2,
-            -0.26,
-            label,
-            ha="center",
+            right + (hi - lo) * 0.012,
+            y,
+            _ms(geo[i]) if have else "--.--",
+            ha="left",
             va="center",
-            fontsize=8.5,
-            color=t["surface"],
+            fontsize=9.5,
+            color=t["muted"],
         )
-        x += ms
+        if i == 2:
+            ax.text(
+                left - (hi - lo) * 0.012,
+                y - 0.42,
+                f"{_ms(C3)} ms",
+                ha="right",
+                va="top",
+                fontsize=11,
+                fontweight="bold",
+                color=t["ink"],
+            )
+
+    ax.axvline(geo[0], color=t["axis"], lw=1.0, ls=(0, (4, 3)), zorder=1)
 
     fig.suptitle(
-        f"pi0.5 action expert, bs=1:   {BASE:.2f} -> {LEDGER_END:.2f} ms   "
-        f"(-{span:.2f} ms, -{100 * span / BASE:.1f}%)",
+        f"pi0.5 action expert, bs=1:   {_ms(BASE)} -> {_ms(C3)} ms   "
+        f"({'-' + _ms(BASE - C3) if have else '--.--'} ms,"
+        f" {f'-{100 * (BASE - C3) / BASE:.1f}%' if have else '--.-%'})",
         x=0.035,
-        y=0.950,
+        y=0.960,
         ha="left",
         fontsize=15.5,
         fontweight="bold",
@@ -240,40 +269,32 @@ def chart_ledger(mode: str) -> None:
     )
     fig.text(
         0.035,
-        0.888,
-        "end-to-end predict_action_batch, plain wall clock.  Baseline is the model "
-        "as extracted: torch.compile max-autotune, none of this applied.",
+        0.905,
+        "The baseline is already compiled. torch.compile gets there first:",
         ha="left",
         fontsize=9.5,
         color=t["ink2"],
     )
+    gain = EAGER - BASE if (EAGER is not None and BASE is not None) else None
     fig.text(
         0.035,
-        0.775,
-        f"{BASE:.2f} ms",
+        0.852,
+        f"eager {_ms(EAGER)} ms  ->  torch.compile max-autotune {_ms(BASE)} ms"
+        f"   ({'-' + _ms(gain) if gain else '--.--'} ms,"
+        f" {f'-{100 * gain / EAGER:.1f}%' if gain else '--.-%'})",
         ha="left",
-        va="bottom",
-        fontsize=10.5,
-        color=t["ink2"],
-    )
-    fig.text(
-        0.965,
-        0.775,
-        f"{LEDGER_END:.2f} ms",
-        ha="right",
-        va="bottom",
-        fontsize=10.5,
+        fontsize=11,
         fontweight="bold",
         color=t["ink"],
     )
 
-    y = 0.565
-    for (label, ms, items), c in zip(CATS, colors):
+    rows = [0.615, 0.395, 0.185]
+    for (label, items), c, fy in zip(CATS, colors, rows):
         fig.patches.append(
             plt.Rectangle(
-                (0.035, y - 0.004),
-                0.012,
-                0.028,
+                (0.035, fy - 0.004),
+                0.011,
+                0.024,
                 transform=fig.transFigure,
                 facecolor=c,
                 edgecolor="none",
@@ -281,41 +302,31 @@ def chart_ledger(mode: str) -> None:
             )
         )
         fig.text(
-            0.057,
-            y,
+            0.055,
+            fy,
             label,
             ha="left",
             va="bottom",
-            fontsize=12,
+            fontsize=11,
             fontweight="bold",
             color=t["ink"],
         )
+        y = fy - 0.040
+        for it in items:
+            fig.text(0.055, y, it, ha="left", va="bottom", fontsize=8.5, color=t["ink2"])
+            y -= 0.031
+
+    if not have:
         fig.text(
             0.965,
-            y,
-            f"-{ms:.2f} ms",
+            0.025,
+            "PLACEHOLDER -- measurement in flight",
             ha="right",
             va="bottom",
-            fontsize=12,
+            fontsize=9,
+            color=t["s2"],
             fontweight="bold",
-            color=t["ink"],
         )
-        y -= 0.052
-        for it in items:
-            fig.text(0.057, y, it, ha="left", va="bottom", fontsize=9.5, color=t["ink2"])
-            y -= 0.040
-        y -= 0.018
-
-    fig.text(
-        0.035,
-        0.030,
-        SINCE,
-        ha="left",
-        va="bottom",
-        fontsize=8.5,
-        color=t["muted"],
-        style="italic",
-    )
     fig.savefig(OUT / f"ledger_{mode}.png")
     plt.close(fig)
 
@@ -459,8 +470,7 @@ def chart_denoise(mode: str) -> None:
     fig.text(
         0.012,
         0.912,
-        "nsys 2026.1.2, stream 157 (Stage-1 captured graph), "
-        "",
+        "nsys 2026.1.2, stream 157 (Stage-1 captured graph), ",
         ha="left",
         fontsize=9,
         color=t["ink2"],

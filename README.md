@@ -3,7 +3,7 @@
 # pi05-infer
 
 A standalone **bs=1 inference engine for the pi0.5 action expert**, extracted from
-[RLinf](https://github.com/RLinf/RLinf) and optimized for the **RTX PRO 5000
+[RLinf](https://github.com/RLinf/RLinf) and optimized for the **NVIDIA RTX PRO 5000
 (GB202 / sm_120)**. Every change is algebraically equivalent: no quantization, no
 change of sampler, no reduction in denoising steps.
 
@@ -14,7 +14,10 @@ change of sampler, no reduction in denoising steps.
   <img alt="52.60 to 42.90 ms, split into CPU overhead -3.44, denoise-step work removed -3.09, kernel fusion and optimization -3.17" src="docs/ledger_light.png">
 </picture>
 
-Current `main`: **40.50 ms** (unlocked wall clock).
+```
+bs=1, 3 x 224^2 cameras, 968 prefix tokens, action chunk 50, 10 denoise steps, bf16
+NVIDIA RTX PRO 5000 Blackwell (sm_120), 300 W, unlocked clock
+```
 
 <details>
 <summary>Where a denoise step goes</summary>
@@ -31,7 +34,7 @@ Per-kernel snapshots: [`docs/kernels/`](docs/kernels/).
 ## Hardware
 
 ```
-GPU            RTX PRO 5000 Blackwell (GB202 / sm_120), 110 SM, 96 MB L2, 300 W
+GPU            NVIDIA RTX PRO 5000 Blackwell (GB202 / sm_120), 110 SMs, 96 MB L2, 300 W
 PyTorch        2.7.1+cu128
 transformers   4.53.2, as patched by openpi
 Python         3.11
@@ -84,7 +87,7 @@ The rest are in [`tools/README.md`](tools/README.md).
 ```
 pi05_infer/    the engine
   gemma/       vendored, modified action-expert Gemma + Triton fusion kernels
-  patches/     optimizations applied to code we do not own
+  patches/     optimizations applied to third-party code at runtime
 bench/         latency bench
 tools/         verification gates and measurement drivers
 docs/          the charts, and make_charts.py which regenerates them
@@ -92,10 +95,10 @@ docs/          the charts, and make_charts.py which regenerates them
 _extract_src/  the original RLinf files
 ```
 
-## Further reading
+## Further Reading
 
-* [`EXTRACTION_NOTES.md`](EXTRACTION_NOTES.md) -- the extraction boundary against RLinf.
-* [`tools/README.md`](tools/README.md) -- which scripts are portable, and which are not.
+* [`EXTRACTION_NOTES.md`](EXTRACTION_NOTES.md): the extraction boundary against RLinf.
+* [`tools/README.md`](tools/README.md): which scripts are portable, and which are not.
 
 ## License
 
