@@ -105,7 +105,7 @@ RLinf-Pi05-LIBERO-SFT/
 | 组件 | 要求 |
 |---|---|
 | Python | `>=3.10,<3.12`;实际开发与运行用的是 3.11 |
-| PyTorch | 本仓库开发所在的 openpi 环境里是 **2.6.0**(Triton 3.2.0)。必须是能面向 sm_120 的构建 -- `2.6.0+cu124` 那个 wheel 只编到 sm_50..sm_90,在 GB202 上根本跑不起来;而上面那些数字所用的确切构建号,本仓库没有记录。 |
+| PyTorch | **2.7.1+cu128** -- 上面每一个数字都是在这个构建上测的。`bench/standalone_infer_bench.py` 会打印自己跑在哪个版本上,所以重跑会记录它自己的。任何构建都可以,只要面向 sm_120:`+cu124` 的 wheel 只编到 sm_50..sm_90,在 GB202 上根本跑不起来。 |
 | openpi | 必须是**打了 `transformers_replace` 补丁**的安装 -- openpi 自己的 `install.sh` 会做这件事 |
 | transformers | 4.53.2,并且是被 openpi 改过的那份,不是原版(见下) |
 | 其他被 import 的 | `numpy`、`einops`、`nvtx`。`nvtx` 没有别的东西会带进来 -- openpi 不依赖它,而少了它 `import pi05_infer` 就会失败。 |
@@ -240,4 +240,7 @@ Apache-2.0([`LICENSE`](LICENSE))。本仓库 vendored 了 HuggingFace Transforme
 [openpi](https://github.com/Physical-Intelligence/openpi)(经
 [RLinf/openpi](https://github.com/RLinf/openpi) fork)与
 [RLinf](https://github.com/RLinf/RLinf) 的代码,逐文件的修改清单见 [`NOTICE`](NOTICE)。
-`dexmal/realtime-vla` 作为 peer 被引用,未复用其代码。
+
+台账图上那两条虚线是 `dexmal/realtime-vla` 和 `limxdynamics/FluxVLA`。两者与我们的配置
+都不是双向对齐的,也都没有复用其代码 -- 每个数字是什么、不是什么,记在
+`docs/make_charts.py` 里。

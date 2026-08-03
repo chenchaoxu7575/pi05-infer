@@ -119,7 +119,7 @@ touched. That environment has to provide:
 | component | requirement |
 |---|---|
 | Python | `>=3.10,<3.12`; developed and run on 3.11 |
-| PyTorch | **2.6.0** (Triton 3.2.0) in the openpi environment this repository is developed in. It must be a build that targets sm_120 -- a `2.6.0+cu124` wheel compiles for sm_50..sm_90 only and cannot run on a GB202 at all, and the exact build used for the numbers above is not recorded in this repository. |
+| PyTorch | **2.7.1+cu128** -- the build every number above was measured on. `bench/standalone_infer_bench.py` prints the version it is running, so a rerun records its own. Any build works provided it targets sm_120: a `+cu124` wheel compiles for sm_50..sm_90 only and cannot run on a GB202 at all. |
 | openpi | installed **with its `transformers_replace` patch applied** -- openpi's own `install.sh` does this |
 | transformers | 4.53.2, as patched by openpi; not a vanilla install (below) |
 | also imported | `numpy`, `einops`, and `nvtx`. `nvtx` is a direct dependency of nothing else here -- openpi does not pull it in, and `import pi05_infer` fails without it. |
@@ -268,5 +268,8 @@ Apache-2.0 ([`LICENSE`](LICENSE)). Vendors code from HuggingFace Transformers,
 [openpi](https://github.com/Physical-Intelligence/openpi) (via the
 [RLinf/openpi](https://github.com/RLinf/openpi) fork) and
 [RLinf](https://github.com/RLinf/RLinf); per-file modifications are listed in
-[`NOTICE`](NOTICE). `dexmal/realtime-vla` is referenced as a peer; none of its code is
-reused.
+[`NOTICE`](NOTICE).
+
+`dexmal/realtime-vla` and `limxdynamics/FluxVLA` appear as the two dashed reference lines
+on the ledger chart. Neither is config-matched to us in both directions, and no code from
+either is reused -- `docs/make_charts.py` records what each number is and what it is not.
