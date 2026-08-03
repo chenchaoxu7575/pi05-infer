@@ -114,16 +114,49 @@ shape is not bit-stable across fresh autotunes even with no patch at all.  That
 is a pre-existing hazard (mitigated in practice by ``PersistentCache`` pinning
 the winner per cache dir), and a reason not to add candidates here.
 
-**Bit-exactness for the BMMs.**  Same rule as above, with one correction that
-matters: the pinned ``BLOCK_K`` is a property of the *shape*, not a constant --
-it is whatever the stock champion for that shape uses, because that is the
-accumulation order the unpatched build produces.  ``_DEFAULT_BMM_SHAPES``
-therefore carries the required ``BLOCK_K`` per shape and every candidate for
-that shape is asserted against it, rather than against a module-wide 128.
+**Pinning ``Q.K^T``.**  The paragraph above says not to *add* candidates to this
+shape.  The reason it gives -- the winner moves from process to process on a
+cold cache -- is also a reason to *remove* them.  MEASURED over 29 cold compiles
+of unchanged source: autotune drew **5 different tiles** for this one shape, and
+in-model the fastest and slowest of the five differ by **20.2%**.  Its own
+selection margin has a **median of 0.00%** while its reproduction noise on the
+same candidate is **6-24%** -- at that ratio it is not choosing, it is sampling.
 
-Kill switch: ``RLINF_SMALL_M_BMM=0``.
+``_DEFAULT_BMM_PINS`` therefore replaces the candidate list for this shape with
+the single measured winner instead of appending to it.  Worth -0.106 ms/predict
+in expectation, and it takes the draw-to-draw sd of 6.41 us/step to exactly
+zero, which is what makes any later A/B on this shape readable at all.
+
+**Bit-exactness for the BMMs.**  The old rule -- ``BLOCK_K`` decides the fp32
+reduction order, everything else is inert -- was **refuted once on each of the
+two shapes it was applied to, and in opposite directions**:
+
+    down_proj, K=4096   BLOCK_K inert; num_stages FLIPS BITS at BLOCK_K=128
+    Q.K^T,     K=256    BLOCK_K inert AND num_stages inert -- all 7 tiles swept
+                        (18 layers x 7.33 M bf16 elements) are torch.equal
+
+One shape says the rule is too weak, the other says it is too strong.  There is
+no reformulation that covers both, because the answer depends on how the K loop
+is actually split for that K -- **it can only be measured**.  So the per-shape
+``BLOCK_K`` in ``_DEFAULT_BMM_SHAPES`` is now informational, the assert that
+enforced it is gone, and both the appended candidates and the pin above carry
+digests taken with ``tools/bitexact_denoise_bmms.py``.  A cuBLAS arm run as a
+positive control *does* come out different, so that gate has resolving power.
+
+⚠️  **``_VERIFIED_CFGS`` and the pin are verified per card, and "verified" stops
+meaning anything on a different one.**  Both were measured on sm_120; the
+reference they were compared against is that card's own stock champion, so on
+another card the *reference itself* moves and the equality claim has no subject.
+The pin declines to install off sm_120 for that reason (and because the tile
+that wins there is a different question).  The digest set does not -- it only
+warns -- because the env hook exists to explore.
+
+Kill switch: ``RLINF_SMALL_M_BMM=0`` (whole patch),
+``RLINF_SMALL_M_BMM_PIN=0`` (keep the appended candidates, restore autotune's
+choice on the pinned shapes).
 Tuning: ``RLINF_SMALL_M_BMM_SHAPES="NxK@BK;..."``,
 ``RLINF_SMALL_M_BMM_CFGS="NxK:BM,BN,BK,stages,warps|...;..."``,
+``RLINF_SMALL_M_BMM_PINS="NxK:BM,BN,BK,stages,warps;..."``,
 ``RLINF_SMALL_M_BMM_MAX_M``.
 """
 
@@ -137,6 +170,7 @@ __all__ = [
     "small_m_mm_enabled",
     "install_small_m_bmm_configs",
     "small_m_bmm_enabled",
+    "small_m_bmm_pin_enabled",
 ]
 
 # (BLOCK_M, BLOCK_N, BLOCK_K, num_stages, num_warps).
@@ -189,13 +223,41 @@ _VERIFIED_CFGS = frozenset(
 )
 
 # ---- attention bmm ----------------------------------------------------------
-# (N, K) -> BLOCK_K that the *stock* champion for that shape already uses. Every
-# appended candidate for the shape must carry exactly this BLOCK_K: it is the
-# only tile parameter that changes how the fp32 accumulation over K is split,
-# so a different value would silently stop being bit-exact w.r.t. an unpatched
-# build. Note the two shapes disagree -- P.V pins 128, Q.K^T pins 32.
+# (N, K) -> BLOCK_K the *stock* champion for that shape uses. This is the shape
+# allowlist; the BLOCK_K is informational only. It used to be asserted as a
+# bit-exactness pin, on the same rule the mm side refuted -- and on these two
+# shapes the rule fails in *both* directions: at K=256, BLOCK_K and num_stages
+# are alike inert (all 7 tiles swept produce byte-identical output). See the
+# BMM bit-exactness note in the module docstring.
 _DEFAULT_BMM_SHAPES = {
-    (256, 1018): 128,  # P.V   bmm(8x50x1018, 8x1018x256)
+    (256, 1018): 128,  # P.V    bmm(8x50x1018, 8x1018x256)
+    (1018, 256): 32,  # Q.K^T  bmm(8x50x256 , 8x256x1018)
+}
+
+# (N, K) -> the single tile inductor is allowed to use for that shape.
+#
+# Unlike _DEFAULT_BMM_CFGS, which *appends* candidates and leaves the choice to
+# autotune, a pin *replaces* the candidate list: autotune has nothing left to
+# choose. That is the point -- on Q.K^T the choice itself is the problem.
+#
+# MEASURED (2026-08-01/02, RTX PRO 5000, 29 cold compiles of the same source):
+# autotune drew 5 different tiles for this one shape, and in-model the fastest
+# and slowest of them differ by 20.2%. Inductor's own selection margin has a
+# median of 0.00% while its reproduction noise on the same candidate is 6-24%,
+# so it is not choosing -- it is sampling. Pinning is worth -0.106 ms/predict in
+# expectation and, more usefully, drops the draw-to-draw sd of 6.41 us/step to
+# exactly zero, which is what makes any later A/B on this shape readable.
+#
+# Numerically free: 7 tiles x 18 layers x 7.33 M bf16 elements, all torch.equal.
+# The gate has resolving power -- a cuBLAS arm run as a positive control does
+# come out different.
+#
+# ONLY APPLIED ON sm_120. The sweep was run on one card; on any other the tile
+# that wins is a different question and autotune is the better answer, so the
+# pin declines to install rather than pinning a tile nobody measured there.
+_PIN_DEVICE_CAPABILITY = (12, 0)
+_DEFAULT_BMM_PINS = {
+    (1018, 256): (64, 128, 32, 4, 4),  # Q.K^T
 }
 
 # (BLOCK_M, BLOCK_N, BLOCK_K, num_stages, num_warps) per (N, K).
@@ -389,23 +451,53 @@ def _parse_bmm_cfgs(raw: Optional[str], shapes: dict) -> dict:
                 tuple(int(v) for v in c.split(",")) for c in rest.split("|") if c.strip()
             )
     for shape, entries in cfgs.items():
-        required_bk = shapes.get(shape)
         for cfg in entries:
             assert len(cfg) == 5, (
                 f"bmm tile entries must be 'BM,BN,BK,stages,warps', got {cfg}"
             )
-            assert required_bk is not None, (
-                f"bmm tile candidates given for shape {shape} but that shape has "
-                f"no BLOCK_K pin in RLINF_SMALL_M_BMM_SHAPES, so bit-exactness "
-                f"cannot be checked"
-            )
-            assert cfg[2] == required_bk, (
-                f"bmm shape {shape} pins BLOCK_K={required_bk} (the value the "
-                f"stock champion for that shape already uses, i.e. the fp32 "
-                f"reduction order an unpatched build produces); candidate {cfg} "
-                f"carries BLOCK_K={cfg[2]} and would silently break bit-exactness"
+        if shape not in shapes:
+            warnings.warn(
+                f"RLINF_SMALL_M_BMM_CFGS: shape {shape} is not in the swept set "
+                f"{sorted(shapes)}. Nothing checks its bit-exactness -- run "
+                f"tools/bitexact_denoise_bmms.py with and without these configs "
+                f"and compare the digests.",
+                RuntimeWarning,
+                stacklevel=2,
             )
     return cfgs
+
+
+def small_m_bmm_pin_enabled() -> bool:
+    """True when the swept-shape tile pins should replace autotune's choice."""
+    return _env_int("RLINF_SMALL_M_BMM_PIN", 1) != 0
+
+
+def _parse_bmm_pins(raw: Optional[str]) -> dict:
+    """``"NxK:BM,BN,BK,s,w;..."`` -> ``{(N, K): (BM, BN, BK, s, w)}``.
+
+    One tile per shape, not a list: a pin whose list has two entries is not a
+    pin. Passing an empty string disables pinning for that shape.
+    """
+    if raw is None:
+        return dict(_DEFAULT_BMM_PINS)
+    pins = {}
+    for entry in raw.split(";"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        nk, _, rest = entry.partition(":")
+        n, _, k = nk.partition("x")
+        assert rest and k, (
+            f"RLINF_SMALL_M_BMM_PINS entries must be 'NxK:BM,BN,BK,stages,warps', "
+            f"got {entry!r}"
+        )
+        cfg = tuple(int(v) for v in rest.split(","))
+        assert len(cfg) == 5, (
+            f"RLINF_SMALL_M_BMM_PINS: a pin is one tile "
+            f"'BM,BN,BK,stages,warps', got {cfg}"
+        )
+        pins[(int(n), int(k))] = cfg
+    return pins
 
 
 def install_small_m_bmm_configs() -> bool:
@@ -436,29 +528,73 @@ def install_small_m_bmm_configs() -> bool:
     shapes = _parse_bmm_shapes(os.environ.get("RLINF_SMALL_M_BMM_SHAPES"))
     cfgs = _parse_bmm_cfgs(os.environ.get("RLINF_SMALL_M_BMM_CFGS"), shapes)
     max_m = _env_int("RLINF_SMALL_M_BMM_MAX_M", 64)
+    pins = _parse_bmm_pins(os.environ.get("RLINF_SMALL_M_BMM_PINS"))
+    if not small_m_bmm_pin_enabled() or not _pin_device_matches():
+        pins = {}
 
     def _small_m_bmm_configs(m, n, k, *, device_type, **kwargs) -> Iterable:
         base = original(m, n, k, device_type=device_type, **kwargs)
         if device_type != "cuda":
             return base
         try:
-            extra = cfgs.get((int(n), int(k))) if int(m) <= max_m else None
+            shape = (int(n), int(k))
+            small = int(m) <= max_m
         except (TypeError, ValueError):  # symbolic shape -> leave it alone
             return base
-        if not extra:
+        if not small:
             return base
         # device_type is a bmm_configs-only argument; filtered_configs does not
         # take it.
+        pin = pins.get(shape)
+        if pin is not None:
+            only = list(filtered_configs(m, n, k, configs=(pin,), **kwargs))
+            # filtered_configs can rewrite or drop a tile (it clamps BLOCK_M to
+            # next_power_of_2(m) and num_warps to BLOCK_M*BLOCK_N//256). If it
+            # dropped this one there is nothing left to compile, so fall back
+            # rather than hand inductor an empty candidate list.
+            if only:
+                return iter(only)
+            return base
+        extra = cfgs.get(shape)
+        if not extra:
+            return base
         return itertools.chain(base, filtered_configs(m, n, k, configs=extra, **kwargs))
 
     bmm_kernel.bmm_configs = _small_m_bmm_configs
     _bump_cache_key_tag(
-        _cfg_tag("small_m_bmm", sorted(cfgs.items()), sorted(shapes.items()), max_m)
+        _cfg_tag(
+            "small_m_bmm",
+            sorted(cfgs.items()),
+            sorted(shapes.items()),
+            sorted(pins.items()),
+            max_m,
+        )
     )
 
     _bmm_installed = True
+    appended = " ".join(f"{n}x{k}+={list(v)}" for (n, k), v in cfgs.items())
+    pinned = " ".join(f"{n}x{k}:={list(v)}" for (n, k), v in pins.items()) or "none"
     print(
         f"[pi05_infer] small-M bmm tiles installed: max_m={max_m} "
-        + " ".join(f"{n}x{k}@BK{shapes[(n, k)]}={list(v)}" for (n, k), v in cfgs.items())
+        f"appended: {appended} pinned: {pinned}"
     )
     return True
+
+
+def _pin_device_matches() -> bool:
+    """True on the one card the tile sweep behind ``_DEFAULT_BMM_PINS`` was run on.
+
+    A pin is a claim that one tile beats every other tile *on this hardware*.
+    That claim does not travel: the winner depends on SM count, L2 size and the
+    roofline knee, none of which are the same on another card. Everywhere else,
+    decline to pin and let autotune do its job -- it is a worse answer only when
+    you have measured a better one.
+    """
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return False
+        return torch.cuda.get_device_capability() == _PIN_DEVICE_CAPABILITY
+    except Exception:  # pragma: no cover - no torch/CUDA is a decline, not a crash
+        return False
