@@ -281,14 +281,37 @@ def _stats_ms(samples: list[float]) -> str:
 
 
 def _read_clocks(device_index: int) -> dict:
-    """SM clock (MHz), power (W) and temperature, via pynvml if available."""
+    """SM clock (MHz), power (W) and temperature, via pynvml if available.
+
+    ``device_index`` is a *torch* ordinal, which is an index into the visible
+    devices. NVML enumerates all physical devices and ignores
+    ``CUDA_VISIBLE_DEVICES``, so under ``CUDA_VISIBLE_DEVICES=1`` the naive
+    ``nvmlDeviceGetHandleByIndex(0)`` reads the wrong card -- silently, and with
+    plausible-looking numbers, because the other GPU is a real GPU. Resolve the
+    handle by the device's UUID instead, which is the same identifier on both
+    sides. Every clock and power figure in this repository depends on this.
+    """
     try:
         import pynvml
     except ImportError:
         return {}
     try:
         pynvml.nvmlInit()
-        h = pynvml.nvmlDeviceGetHandleByIndex(device_index)
+        uuid = torch.cuda.get_device_properties(device_index).uuid
+        try:
+            h = pynvml.nvmlDeviceGetHandleByUUID(f"GPU-{uuid}".encode())
+        except Exception:
+            # Older pynvml, or a torch without .uuid: fall back to the raw index
+            # and say so, rather than reporting another card's clock as this one's.
+            h = pynvml.nvmlDeviceGetHandleByIndex(device_index)
+            if pynvml.nvmlDeviceGetCount() > 1 and os.environ.get(
+                "CUDA_VISIBLE_DEVICES"
+            ):
+                return {
+                    "error": "cannot resolve NVML handle by UUID and "
+                    "CUDA_VISIBLE_DEVICES is set on a multi-GPU host: "
+                    "refusing to report a clock that may belong to another card"
+                }
         return {
             "sm_clock_mhz": pynvml.nvmlDeviceGetClockInfo(h, pynvml.NVML_CLOCK_SM),
             "mem_clock_mhz": pynvml.nvmlDeviceGetClockInfo(h, pynvml.NVML_CLOCK_MEM),
