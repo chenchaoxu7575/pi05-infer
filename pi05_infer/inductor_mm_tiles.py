@@ -145,6 +145,11 @@ __all__ = [
 # shapes -- see the bit-exactness note above.  Do not add a candidate without
 # re-running that check; "it only changes BLOCK_M/BLOCK_N/warps" is not a proof.
 #
+# (32,32,256,4,4) is the measured champion for both shapes (2026-07-31, in-model
+# nsys at 1897 MHz): down_proj 14.794 -> 12.375 us/call (-16.4%), o_proj
+# 9.414 -> 7.797 (-17.2%); denoise stream -0.654 ms/predict, e2e paired A/B
+# -0.52 +/- 0.28 ms (4/4 same sign).
+#
 # Three entries were REMOVED on 2026-07-31 because they flip down_proj's output
 # bits -- (16,64,128,4,4), (16,64,128,3,4), (16,32,128,4,2), all num_stages<5 at
 # BLOCK_K=128.  They shipped for weeks and stayed bit-exact only because
@@ -157,7 +162,9 @@ __all__ = [
 # forcing 4 warps past that clamp changes nothing (14.479 us either way).  The
 # 128-CTA corner is reachable today and is simply slower.
 _DEFAULT_CFGS = (
-    (16, 64, 128, 5, 4),
+    (32, 32, 256, 4, 4),  # champion, both shapes
+    (32, 32, 256, 3, 4),
+    (16, 64, 128, 5, 4),  # previous champion; kept as the reference tile
     (32, 32, 128, 5, 4),
 )
 
@@ -297,7 +304,7 @@ def install_small_m_mm_configs() -> bool:
         return itertools.chain(base, filtered_configs(m, n, k, configs=cfgs, **kwargs))
 
     mm_kernel.mm_configs = _small_m_mm_configs
-    _bump_cache_key_tag("small_m_mm")
+    _bump_cache_key_tag(_cfg_tag("small_m_mm", cfgs, shapes, max_m))
 
     _installed = True
     print(
@@ -305,6 +312,22 @@ def install_small_m_mm_configs() -> bool:
         f"max_m={max_m} extra_cfgs={list(cfgs)}"
     )
     return True
+
+
+def _cfg_tag(name: str, *parts) -> str:
+    """A cache-key tag that changes when the *candidate set* changes.
+
+    ``_bump_cache_key_tag("small_m_mm")`` used to pass a constant, which
+    separates patch-on from patch-off but **not** one config list from another:
+    editing ``_DEFAULT_CFGS`` or setting ``RLINF_SMALL_M_MM_CFGS`` left the key
+    untouched, so inductor replayed the previously compiled winner and the new
+    candidates were never benchmarked. Any A/B over tile candidates done that
+    way is meaningless. Fold the actual inputs into the tag instead.
+    """
+    import hashlib
+
+    digest = hashlib.sha256(repr(parts).encode()).hexdigest()[:12]
+    return f"{name}:{digest}"
 
 
 def _bump_cache_key_tag(tag: str) -> None:
@@ -429,7 +452,9 @@ def install_small_m_bmm_configs() -> bool:
         return itertools.chain(base, filtered_configs(m, n, k, configs=extra, **kwargs))
 
     bmm_kernel.bmm_configs = _small_m_bmm_configs
-    _bump_cache_key_tag("small_m_bmm")
+    _bump_cache_key_tag(
+        _cfg_tag("small_m_bmm", sorted(cfgs.items()), sorted(shapes.items()), max_m)
+    )
 
     _bmm_installed = True
     print(
