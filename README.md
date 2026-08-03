@@ -2,9 +2,9 @@
 
 # pi05-infer
 
-A standalone **bs=1 inference engine for the π0.5 action expert**, extracted from
+A standalone **bs=1 inference engine for the pi0.5 action expert**, extracted from
 [RLinf](https://github.com/RLinf/RLinf) and optimized for the **RTX PRO 5000
-(GB202 / sm_120, Blackwell)**. Every item is an algebraically equivalent transform —
+(GB202 / sm_120, Blackwell)**. Every item is an algebraically equivalent transform --
 **no quantization, no change of sampler, no reduction in denoising steps**.
 
 ## Results
@@ -35,7 +35,7 @@ Three panels, **three different rulers**: the prehistory before this repository 
 measurement protocol), this repository's paired end-to-end ledger, and the same optimizations
 counted as GPU busy per denoising step.
 
-The two dashed lines mark where reference implementations sit — neither is a paired
+The two dashed lines mark where reference implementations sit -- neither is a paired
 measurement and no win/loss is claimed.
 
 <details>
@@ -52,9 +52,9 @@ measurement and no win/loss is claimed.
 </picture>
 
 Both charts are stamped with the commit and date they were profiled at, and neither is
-re-derived against current main — see the note in `docs/make_charts.py` for why not.
+re-derived against current main -- see the note in `docs/make_charts.py` for why not.
 The second one is the reason this project has an upper bound: **the 968-token prefix is
-71.7 % of GPU busy, so even a free denoise loop caps the whole-predict speedup at 1.39×.**
+71.7 % of GPU busy, so even a free denoise loop caps the whole-predict speedup at 1.39x.**
 
 </details>
 
@@ -64,7 +64,7 @@ Everything here was measured, tuned and verified on **one card**: RTX PRO 5000 B
 (GB202 / sm_120), 110 SMs, 96 MB L2, 300 W cap.
 
 **On any other GPU, both the performance claims and the bit-exactness claims stop
-applying** — and the second one is the surprising half. The inductor tile choices were
+applying** -- and the second one is the surprising half. The inductor tile choices were
 tuned against this card's roofline knee and SM count, which is the expected kind of
 non-portability. But "bit-identical" here means *identical to what an unpatched build
 produces on this card*, and an unpatched build picks a different kernel on a different
@@ -76,7 +76,7 @@ the gates in [`tools/`](tools/README.md) on your card before quoting any number 
 
 ## Install and run
 
-You need a checkpoint. The published SFT checkpoints work directly — for example
+You need a checkpoint. The published SFT checkpoints work directly -- for example
 [`RLinf/RLinf-Pi05-LIBERO-SFT`](https://huggingface.co/RLinf/RLinf-Pi05-LIBERO-SFT):
 
 ```bash
@@ -99,7 +99,7 @@ resolve to `physical-intelligence/libero`. If you point `--model-path` at a
 checkpoint whose asset id differs, the weights load and the run fails later on the
 missing stats.
 
-Use the existing RLinf benchmark container image — **no Docker rebuild required**. Install
+Use the existing RLinf benchmark container image -- **no Docker rebuild required**. Install
 editable and with `--no-deps`, so the torch / transformers / openpi versions pinned inside
 the container are left alone:
 
@@ -136,14 +136,14 @@ python tools/isolation_check.py          # expert = pi05_infer.gemma, prefix = t
 # kernel / GEMM / KV-level bit-exactness gates
 python tools/bitgate.py                  # the two Triton fusion kernels
 python tools/bitexact_denoise_gemms.py   # small-M mm retile
-python tools/bitexact_denoise_bmms.py    # attention bmm retile + the Q·Kᵀ tile pin
+python tools/bitexact_denoise_bmms.py    # attention bmm retile + the Q*K^T tile pin
 python tools/bitexact_prefix_kv.py       # prefix last-layer skip
 python tools/bitexact_prefix_qkv.py      # fused prefix QKV
 
 # structural optimizations on the compiled path (frozen prefix + four-process control gate)
 bash tools/run_bitexact_backfill.sh <stage>   # siglip|extraction|prefix|adarms|adarms_eager|qkv|kvstatic|attmask
 
-# end-to-end numerical A/B -- ⚠️ four processes, always with an empty control; declares
+# end-to-end numerical A/B -- WARNING: four processes, always with an empty control; declares
 # INCONCLUSIVE (never PASS) unless both same-arm controls come back clean
 GATE_OFF="RLINF_SMALL_M_MM=0" GATE_ON="RLINF_SMALL_M_MM=1" \
   tools/bitexact_gate.sh /tmp/gate_small_m --stage1 --iters 1 --warmup 4
@@ -152,9 +152,9 @@ GATE_OFF="RLINF_SMALL_M_MM=0" GATE_ON="RLINF_SMALL_M_MM=1" \
 Each gate runs both arms and prints a digest; the two must match. Every optimization has a
 kill switch, and the OFF arm exercises a verified fallback path.
 
-⚠️ **Bit-identity here is tiered by compile path, and is not claimed uniformly.** Some items
+WARNING: **Bit-identity here is tiered by compile path, and is not claimed uniformly.** Some items
 are bit-identical under eager but not under the shipping `max-autotune`, whose own kernel
-choice is not stable across cold autotunes — on one shape, 1 of 4 cold caches picked cuBLAS
+choice is not stable across cold autotunes -- on one shape, 1 of 4 cold caches picked cuBLAS
 over the Triton template, which has a different digest. What holds for every item without
 qualification is that the transform is algebraically equivalent. See the bit-exactness note
 in `pi05_infer/patches/inductor_mm_tiles.py`, which documents a rule this project believed, shipped,
@@ -179,7 +179,7 @@ _extract_src/  the original RLinf files, before extraction
 PaliGemma **prefix** keeps stock transformers. That seam is deliberate: it is what stops a
 denoise kernel change from reaching the 968-token prefix.
 
-**`_extract_src/` is not part of the package** — nothing imports it, and it is excluded from
+**`_extract_src/` is not part of the package** -- nothing imports it, and it is excluded from
 the build and from linting. It is the unmodified RLinf source that `pi05_infer/` was
 extracted from, kept in the tree so that the extraction can be audited by diff rather than
 taken on trust. It is not refactored and is not meant to be; `EXTRACTION_NOTES.md` is the
@@ -193,8 +193,8 @@ per-file account of what changed.
 > then. Where the source cites one of those documents by name, the name is provenance,
 > not a link.
 
-* **[`EXTRACTION_NOTES.md`](EXTRACTION_NOTES.md)** — the extraction boundary against RLinf.
-* **[`tools/README.md`](tools/README.md)** — which scripts are portable, and which are not.
+* **[`EXTRACTION_NOTES.md`](EXTRACTION_NOTES.md)** -- the extraction boundary against RLinf.
+* **[`tools/README.md`](tools/README.md)** -- which scripts are portable, and which are not.
 
 ## License and provenance
 

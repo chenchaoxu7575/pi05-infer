@@ -18,9 +18,9 @@ is consumed. So nothing downstream of layer 17's ``k_proj``/``v_proj`` has a
 consumer: q_proj, attention, o_proj, both residuals, the post-attention norm and
 the MLP are all dead. That is 99.1 % of the layer, 5.5 % of the 18-layer LM.
 
-⚠️  Declines to install when the model has a VLM value head, which reads exactly
+WARNING: declines to install when the model has a VLM value head, which reads exactly
 this hidden state -- present in every shipped pi0.5 PPO config, absent for
-DSRL/SAC and here. **Quote the gain only with that condition attached.** Also
+DSRL/SAC and here. Quote the gain only with that condition attached. Also
 declines per call when ``use_cache`` is off, no cache was passed,
 ``output_attentions`` is requested, or RoPE tables are missing.
 

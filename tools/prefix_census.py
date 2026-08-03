@@ -20,7 +20,7 @@ attributes each kernel to the innermost enclosing NVTX range via its launch site
 which is exact; comparing GPU timestamps against CPU ranges is not, because
 kernels routinely finish after their range has closed.
 
-⚠️  Kernels launched from a captured graph replay carry the correlation of the
+WARNING: kernels launched from a captured graph replay carry the correlation of the
 replay call, so everything inside the Stage-1 denoise graph is attributed to
 whatever range wraps ``graph.replay()``. Correct for the prefix, which is never
 captured; the denoise rows are graph-granular.

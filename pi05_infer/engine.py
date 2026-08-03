@@ -22,7 +22,7 @@ Kept: ``predict_action_batch`` -> ``sample_actions`` -> ``sample_mean_var_val``
 ``enable_torch_compile``, the Stage-1 denoise CUDA graph, the adaRMS table and
 ``invalidate_weight_derived_caches``.  Dropped: everything RL.
 
-⚠️  Every statement inside one denoise step is byte-identical to the original,
+WARNING: every statement inside one denoise step is byte-identical to the original,
 including the RL-only ``get_logprob_norm`` and zero-valued ``value_t``: they sit
 inside the captured graph, so removing them would change the kernel count the
 regression gate measures.  Deletions are confined to code outside the step body.
@@ -495,7 +495,7 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
     def _build_step_invariants(self, state, x_t, prefix_pad_masks):
         """Refresh the hoisted step-invariant denoise inputs for this predict.
 
-        ⚠️  Allocated once, refilled **in place**: the Stage-1 graph records the
+        WARNING: allocated once, refilled in place. The Stage-1 graph records the
         addresses these buffers had at capture, so reallocating would leave it
         pointing at freed memory. Any shape that could force a reallocation is
         part of ``_denoise_graph_signature`` -- asserted below, not assumed.

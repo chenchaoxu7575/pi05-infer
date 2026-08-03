@@ -1,7 +1,7 @@
 """Kernel-count summary for a denoise stream: total/step plus a category rollup.
 
 Usage: ksum.py <sqlite> [stream] [nsteps]
-Categories collapse inductor's per-layer name suffixes (…_31, …_35) so that the
+Categories collapse inductor's per-layer name suffixes (..._31, ..._35) so that the
 36 distinct RMSNorm kernels show up as one row with n/step = 36.
 """
 import re

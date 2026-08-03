@@ -1,12 +1,12 @@
 #!/bin/bash
-# Backfill driver: the three evidence gaps left open by RESULTS_dump_actions_determinism.md §7.
+# Backfill driver: the three evidence gaps left open by RESULTS_dump_actions_determinism.md section 7.
 #
 #   1  SigLIP three-view batching        -> tools/bitexact_siglip_batch.py      (in-process A/B)
 #   2  repo extraction equivalence       -> tools/bitexact_extraction.py        (in-process A/B)
 #   3  the four eager-only optimizations -> tools/bitexact_compiled_toggles.py  (4-run gate)
 #
 # Every stage runs its OFF-vs-OFF control first and reports INCONCLUSIVE rather than PASS
-# when the control fails, per RESULTS_dump_actions_determinism.md §5.
+# when the control fails, per RESULTS_dump_actions_determinism.md section 5.
 #
 #   docker exec pi05bench bash -lc "/path/to/pi05-infer/tools/run_bitexact_backfill.sh <stage>"
 #

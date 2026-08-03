@@ -16,13 +16,13 @@ r"""Measure the *achievable* dense bf16 tensor-core throughput of this GPU.
 MFU needs a measured denominator, not an assumed peak. Compute-side twin of the
 DRAM bandwidth probe.
 
-Two traps this is built to avoid:
+Two traps this is built to avoid, both of which silently inflate the result:
 
-1. ⚠️  **Never fill operands with ``torch.empty``/``zeros``.** CUDA returns
+1. Never fill operands with ``torch.empty``/``zeros``. CUDA returns
    zeroed pages; almost no bits toggle, the power cap is never hit, the clock runs
    ~18 % high and the "peak" is a fantasy. ``--data zeros`` reproduces that on
    purpose.
-2. ⚠️  **Never report a cold burst as the peak.** Runtime tracks SM clock nearly
+2. Never report a cold burst as the peak. Runtime tracks SM clock nearly
    1:1, so 30 cold iterations and 1000 sustained ones are different machines. Both
    are reported, with the clock trace.
 

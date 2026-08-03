@@ -18,12 +18,12 @@ mathematical identity (``attention_bias=False``, so no bias to concatenate). It
 pays because ``N = 256`` is too narrow to amortise the A-traffic: k+v are 0.9 %
 of the LM's FLOPs but 3.3 % of its kernel time.
 
-⚠️  Layer 17 is excluded. A wider N makes inductor pick a different kernel:
+WARNING: layer 17 is excluded. A wider N makes inductor pick a different kernel:
 ``cat[q,k,v] -> 2560`` is bit-identical, but ``cat[k,v] -> 512`` (what the last
 layer would use, since ``prefix_last_layer.py`` reduced it to k/v) moves 39 % of
 elements by 1 ULP -- and the denoise loop consumes that layer's KV cache.
 
-⚠️  ``_pi05_qkv_w`` is weight-derived and goes stale on an in-place weight sync.
+WARNING: ``_pi05_qkv_w`` is weight-derived and goes stale on an in-place weight sync.
 ``refresh_fused_prefix_qkv`` re-derives it via ``copy_`` (never reallocating, so
 a captured graph stays valid) and is wired into
 ``invalidate_weight_derived_caches``.

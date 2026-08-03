@@ -23,7 +23,7 @@ Method, kept identical across builds so the numbers stay comparable:
 * **Idle** = step wall minus the *union* of all kernel intervals clipped to the
   window. Union, not sum, so concurrent kernels are not double counted.
 
-⚠️  The Stage-1 on/off signal is the count of ``denoise/expert_forward`` NVTX
+WARNING: the Stage-1 on/off signal is the count of ``denoise/expert_forward`` NVTX
 ranges per predict (10 = eager per step, 0 = inside the captured graph), also
 reported. Do NOT use a non-null ``graphNodeId`` -- inductor's max-autotune emits
 its own cudagraphs, so those kernels are graph nodes with Stage 1 off too.

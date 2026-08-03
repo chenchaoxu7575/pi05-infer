@@ -6,7 +6,7 @@ for in-place weight sync, and the two Triton epilogue fusions in
 :mod:`rlinf_fused_denoise`. Everything it does not modify is imported from the
 installed ``transformers``.
 
-⚠️  **Only the action expert uses this.** The PaliGemma prefix keeps stock
+WARNING: only the action expert uses this. The PaliGemma prefix keeps stock
 ``transformers.models.gemma``. That split is what stops a kernel tuned for the
 50-token denoise suffix from silently capturing the 968-token prefix.
 """

@@ -25,7 +25,7 @@ which is all ``sample_actions`` consumes from the prefix), and ``ACT`` as a
 cross-check. Each arm runs twice as an in-process control: arm-vs-itself not
 bit-identical yields INCONCLUSIVE, never PASS.
 
-⚠️  Batching is a mathematical identity (SigLIP attention never crosses the batch
+WARNING: batching is a mathematical identity (SigLIP attention never crosses the batch
 dim) but not automatically a bit-level one: the GEMMs go M=256 -> 768, so
 cuBLAS/inductor may pick different tiles and reduction splits. A nonzero result
 means "a different but equally valid summation order", not "wrong".

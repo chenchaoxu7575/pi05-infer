@@ -15,7 +15,7 @@ the parameters: at K=4096 ``num_stages`` flips ``down_proj``'s output bits while
 ``BLOCK_K`` is inert, at K=256 both are inert.  Re-run
 ``tools/bitexact_denoise_{gemms,bmms}.py`` before adding a candidate.
 
-⚠️  sm_120 only.  "Bit-identical" means identical to the unpatched build *on this
+WARNING: sm_120 only. "Bit-identical" means identical to the unpatched build *on this
 card*, and elsewhere that reference is a different kernel.  The pin declines to
 install off sm_120; the digest set only warns.
 

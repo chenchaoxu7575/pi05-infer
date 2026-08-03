@@ -8,7 +8,7 @@ from a profile; each row carries the note it came from. Charts 2 and 3 come from
 nsys sqlite exports and can be re-derived with ``--sqlite``, which prints what it
 derived so it can be diffed against the constants below.
 
-⚠️  Chart 1's three panels use three different rulers and must not be chained.
+WARNING: chart 1's three panels use three different rulers and must not be chained.
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ def _rounded_hbar(ax, y, x0, x1, height, color, radius_pt=4.0, zorder=3):
     explicitly, with the point->data conversion done per axis so the arcs are
     round on screen.
 
-    ⚠️  Call only after the axes limits and subplot geometry are final -- the
+    WARNING: call only after the axes limits and subplot geometry are final -- the
     conversion reads ``ax.get_window_extent()``.
     """
     fig = ax.figure
@@ -179,9 +179,9 @@ LEDGER = [
 # EnvWorker path under nsys, on another box, where e2e means "sum of the
 # per-phase CPU wall clocks under nsys". Same compile config on both sides.
 #
-# ⚠️  58.9 -> 52.60 is a change of ruler, NOT an optimization. The two are ~6 ms
+# WARNING: 58.9 -> 52.60 is a change of ruler, NOT an optimization. The two are ~6 ms
 # apart because of measurement scope; never subtract them.
-# ⚠️  These rows are single-factor arms off the compile-only row, not a chain.
+# WARNING: these rows are single-factor arms off the compile-only row, not a chain.
 #
 # (label, e2e_ms, delta_vs_compile_only, source)
 PREHISTORY = [
@@ -202,7 +202,7 @@ PREHISTORY = [
 # nothing overlaps, so this equals the sum of kernel durations. All rows and both
 # peers sit on this one ruler; each row's own source is in its tuple below.
 #
-# ⚠️  Row 2 lumps four optimizations and is cross-session, not a paired A/B --
+# WARNING: row 2 lumps four optimizations and is cross-session, not a paired A/B --
 # marked in the chart. The captured graph is not faster in GPU-busy terms at all;
 # it converts idle into busy, so its win shows up only in wall clock.
 #
@@ -229,7 +229,7 @@ PEER_US, PEER_KERN = 1191.0, 165
 # 44.9 ms/predict at 968 prefix tokens. Their own default is a lighter 560-token
 # config at 31.1 ms, which must never be compared against our 968-token numbers.
 #
-# ⚠️  NOT config-matched, in both directions: chunk 10 not 50, and their timer
+# WARNING: not config-matched, in both directions: chunk 10 not 50, and their timer
 # skips the ~2-3 ms of CPU preprocessing ours includes (both cheaper for them);
 # their loop recomputes adaRMS every step and syncs per call (costlier).
 FLUX_MS = 44.9

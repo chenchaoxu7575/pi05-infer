@@ -16,7 +16,7 @@
 # So this driver runs FOUR processes: each arm twice. The cross-arm comparison is only
 # reported once both same-arm controls are clean; otherwise the verdict is INCONCLUSIVE,
 # never PASS. All four share one TORCHINDUCTOR_CACHE_DIR so that the shapes neither arm
-# touches keep the same autotune winner (see RESULTS_small_m_mm_tiles.md §5.2).
+# touches keep the same autotune winner (see RESULTS_small_m_mm_tiles.md section 5.2).
 set -u
 D=${1:?usage: bitexact_gate.sh OUTDIR [bench args...]}
 shift
