@@ -28,8 +28,8 @@ Requires the isolated SGLang venv (torch 2.11 / cu130); it must NOT be run with
 the openpi venv interpreter.
 
 Usage:
-    /workspace/sglang_bench/venv/bin/python tools/sglang_pi05_bench.py \
-        --model-path /workspace/rlinf_pub/models/RLinf-Pi05-LIBERO-SFT \
+    /path/to/sglang-venv/bin/python tools/sglang_pi05_bench.py \
+        --model-path /path/to/RLinf-Pi05-LIBERO-SFT \
         --warmup 8 --iters 30 --json out.json
 """
 
@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import time
 from types import SimpleNamespace
@@ -48,7 +49,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--model-path",
-        default="/workspace/rlinf_pub/models/RLinf-Pi05-LIBERO-SFT",
+        default=os.environ.get("PI05_MODEL_PATH"),
+        required="PI05_MODEL_PATH" not in os.environ,
         help="openpi-layout checkpoint dir (model.safetensors).",
     )
     parser.add_argument("--batch-size", type=int, default=1)

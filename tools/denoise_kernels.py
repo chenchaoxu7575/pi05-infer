@@ -10,18 +10,16 @@ what this reports (234.90) and the historically recorded 238. Widening the windo
 that point spills into the next predict's prefix, so this tight definition is used
 consistently for both arms of an A/B.
 
-Usage: denoise_kernels.py <sqlite> [<sqlite> ...]   (default: the two A/B profiles)
+Usage: denoise_kernels.py <sqlite> [<sqlite> ...]   -- one per A/B arm
 """
 
 import sqlite3
 import sys
 
-_DEFAULT = [
-    "/workspace/rlinf_pub/pi05_infer_runs/nsys_rlinf.sqlite",
-    "/workspace/rlinf_pub/pi05_infer_runs/nsys_pi05infer.sqlite",
-]
+if len(sys.argv) < 2:
+    sys.exit("usage: denoise_kernels.py <nsys .sqlite> [<nsys .sqlite> ...]")
 
-for tag in sys.argv[1:] or _DEFAULT:
+for tag in sys.argv[1:]:
     c = sqlite3.connect(tag)
     k157 = list(c.execute(
         "select start,end from CUPTI_ACTIVITY_KIND_KERNEL where streamId=157 order by start"))

@@ -6,12 +6,29 @@ build-backend = "setuptools.build_meta"
 name = "pi05-infer"
 version = "0.1.0"
 description = "Standalone pi0.5 / pi0 bs=1 inference path extracted from RLinf"
+readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.10,<3.12"
+authors = [{ name = "Chenchao Xu" }]
+keywords = ["pi0", "vla", "inference", "triton", "torch-compile", "robotics"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 # Runtime deps (torch, openpi, transformers, einops, numpy, typing_extensions) are
 # intentionally NOT declared: this package is installed with `pip install -e --no-deps`
 # into an existing openpi environment whose torch/transformers builds must not be
 # touched. See README.md.
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/chenchaoxu7575/pi05-infer"
+Source = "https://github.com/chenchaoxu7575/pi05-infer"
+Issues = "https://github.com/chenchaoxu7575/pi05-infer/issues"
 
 [tool.setuptools.packages.find]
 include = ["pi05_infer*"]
@@ -30,5 +47,5 @@ select = ["E", "F", "I"]
 ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
-# vendored verbatim from claude_mem/.../kernel_fusion/scripts/bitgate.py
+# vendored verbatim from the internal kernel-fusion scripts; kept byte-identical
 "tools/bitgate.py" = ["E741"]

@@ -12,6 +12,7 @@ Fails loudly if either side leaks into the other. Run with no arguments:
 """
 
 import argparse
+import os
 import sys
 
 import torch
@@ -27,7 +28,9 @@ def _mod(obj) -> str:
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument(
-        "--model-path", default="/workspace/rlinf_pub/models/RLinf-Pi05-LIBERO-SFT"
+        "--model-path",
+        default=os.environ.get("PI05_MODEL_PATH"),
+        required="PI05_MODEL_PATH" not in os.environ,
     )
     p.add_argument("--config-name", default="pi05_turtle")
     p.add_argument("--num-steps", type=int, default=10)

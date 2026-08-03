@@ -55,7 +55,9 @@ import torch
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--model-path", default="/workspace/rlinf_pub/models/RLinf-Pi05-LIBERO-SFT"
+        "--model-path",
+        default=os.environ.get("PI05_MODEL_PATH"),
+        required="PI05_MODEL_PATH" not in os.environ,
     )
     parser.add_argument("--config-name", default="pi05_turtle")
     parser.add_argument("--action-chunk", type=int, default=50)

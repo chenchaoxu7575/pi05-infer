@@ -55,7 +55,8 @@ sys.path.insert(0, os.path.join(_ROOT, "bench"))
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--model-path", default="/workspace/rlinf_pub/models/RLinf-Pi05-LIBERO-SFT")
+    p.add_argument("--model-path", default=os.environ.get("PI05_MODEL_PATH"),
+        required="PI05_MODEL_PATH" not in os.environ,)
     p.add_argument("--config-name", default="pi05_turtle")
     p.add_argument("--action-chunk", type=int, default=50)
     p.add_argument("--num-steps", type=int, default=10)

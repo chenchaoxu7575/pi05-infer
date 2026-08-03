@@ -8,8 +8,7 @@
 # Every stage runs its OFF-vs-OFF control first and reports INCONCLUSIVE rather than PASS
 # when the control fails, per RESULTS_dump_actions_determinism.md §5.
 #
-#   ssh pro5k 'docker exec pi05bench bash -lc \
-#       "/workspace/rlinf_pub/bitexact_backfill/pi05-infer/tools/run_bitexact_backfill.sh <stage>"'
+#   docker exec pi05bench bash -lc "/path/to/pi05-infer/tools/run_bitexact_backfill.sh <stage>"
 #
 # GPU 1 by default (another agent owns GPU 0 and is doing precise timing there): no clock
 # locking, no /tmp/pi05_gpu_timing.lock -- none of these checks measures time.
@@ -17,7 +16,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 
 PY=${PY:-/opt/venv/openpi/bin/python}
-OUT=${OUT:-/workspace/rlinf_pub/bitexact_backfill/out}
+OUT=${OUT:-/tmp/pi05_bitexact_backfill}
 TI=${TI:-/tmp/ti_bitexact_backfill}
 PREFIX=${PREFIX:-$OUT/frozen_prefix.pt}
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}

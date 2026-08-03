@@ -24,25 +24,33 @@ This script only READS the RLinf checkout; it never writes to it.
 
 Usage:
     /opt/venv/openpi/bin/python tools/ab_rlinf_reference.py \
-        --rlinf-root /workspace/rlinf_pub/RLinf-pi05-nsys-profile \
+        --rlinf-root /path/to/RLinf \
         --dump-actions /tmp/ref_rlinf.pt
 """
 
 import argparse
+import os
+import pathlib
 import sys
 import time
 
 import torch
 from omegaconf import OmegaConf
 
-sys.path.insert(0, "/workspace/rlinf_pub/pi05-infer/bench")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "bench"))
 from standalone_infer_bench import _stats_ms, make_env_obs  # noqa: E402
 
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--rlinf-root", default="/workspace/rlinf_pub/RLinf-pi05-nsys-profile")
-    p.add_argument("--model-path", default="/workspace/rlinf_pub/models/RLinf-Pi05-LIBERO-SFT")
+    p.add_argument(
+        "--rlinf-root",
+        default=os.environ.get("RLINF_ROOT"),
+        required="RLINF_ROOT" not in os.environ,
+        help="Checkout of RLinf to use as the reference arm.",
+    )
+    p.add_argument("--model-path", default=os.environ.get("PI05_MODEL_PATH"),
+        required="PI05_MODEL_PATH" not in os.environ,)
     p.add_argument("--config-name", default="pi05_turtle")
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--num-steps", type=int, default=10)

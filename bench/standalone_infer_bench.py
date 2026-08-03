@@ -22,7 +22,7 @@ phase decomposition are otherwise unchanged.
 
 Usage (inside the benchmark container):
     /opt/venv/openpi/bin/python bench/standalone_infer_bench.py \
-        --model-path /workspace/rlinf_pub/models/RLinf-Pi05-Turtle-SFT
+        --model-path /path/to/RLinf-Pi05-LIBERO-SFT   # or $PI05_MODEL_PATH
 
     # sync-timed phase breakdown
     ... --phases
@@ -44,7 +44,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--model-path",
-        default="/workspace/rlinf_pub/models/RLinf-Pi05-LIBERO-SFT",
+        default=os.environ.get("PI05_MODEL_PATH"),
+        required="PI05_MODEL_PATH" not in os.environ,
         help="Checkpoint dir (safetensors + <asset_id>/norm_stats.json).",
     )
     parser.add_argument(

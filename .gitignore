@@ -7,3 +7,5 @@ dist/
 *.nsys-rep
 *.sqlite
 runs/
+.ruff_cache/
+.claude/CLAUDE.md

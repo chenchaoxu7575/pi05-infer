@@ -39,6 +39,7 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 
 import torch
@@ -47,7 +48,9 @@ import torch
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
-        "--model-path", default="/workspace/rlinf_pub/models/RLinf-Pi05-LIBERO-SFT"
+        "--model-path",
+        default=os.environ.get("PI05_MODEL_PATH"),
+        required="PI05_MODEL_PATH" not in os.environ,
     )
     p.add_argument("--config-name", default="pi05_turtle")
     p.add_argument("--action-horizon", type=int, default=50)

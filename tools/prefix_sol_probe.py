@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 
@@ -82,7 +83,9 @@ def timed_loop(fn, seconds: float, sampler: ClockSampler, min_iters: int = 20) -
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
-        "--model-path", default="/workspace/rlinf_pub/models/RLinf-Pi05-LIBERO-SFT"
+        "--model-path",
+        default=os.environ.get("PI05_MODEL_PATH"),
+        required="PI05_MODEL_PATH" not in os.environ,
     )
     p.add_argument("--config-name", default="pi05_turtle")
     p.add_argument("--batch-size", type=int, default=1)
