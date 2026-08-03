@@ -221,8 +221,12 @@ DEN_LEDGER = [
 
 # --- the two reference implementations, on both panel 2 and panel 3 --------
 # dexmal/realtime-vla @ b86a942: our config, our GPU, same day, real weights, our
-# e2e scope. The only paired head-to-head we have is that run, and we lost it:
-# theirs 43.41 vs ours-that-day 44.55.
+# e2e scope.
+#
+# WARNING: the dashed line is not paired against the bar it sits beside. 43.41 was
+# taken the same session as our 44.55; the ledger ends at 42.90, which is a later
+# build measured on another day. Those two numbers are adjacent on this chart and
+# were never compared to each other, which is why no verdict is drawn from them.
 PEER_MS = 43.41
 PEER_US, PEER_KERN = 1191.0, 165
 # limxdynamics/FluxVLA @ 7f9f774 - a DIFFERENT repo from dexmal/realtime-vla.
