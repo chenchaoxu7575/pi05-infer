@@ -12,18 +12,25 @@ A standalone **bs=1 inference engine for the pi0.5 action expert**, extracted fr
 End-to-end `predict_action_batch`, on the card named above:
 
 ```
-Ledger (paired A/B chain, 9 steps, plain wall clock):  52.60 -> 42.90 ms  (-18.4%)
-Since the ledger, each on its own locked baseline:     two tile changes, -0.73 / -0.11 ms
-Current main, unlocked plain wall clock, n=30:         40.63 ms  (p50; mean 40.56,
-                                                       39.40 .. 41.47, SM clock
-                                                       sampled 2235-2265 MHz)
+Ledger (paired A/B chain, 8 optimizations, plain wall clock):
+    52.60 -> 42.90 ms  (-18.4%)
+
+Since the ledger, two tile changes, each on its own baseline:
+    down_proj / o_proj retile   -0.52 +/- 0.28 ms   locked paired A/B, 4/4 rounds same sign
+    Q*K^T tile pin              -0.106 ms           in expectation, not a paired A/B
+
+Current main, unlocked plain wall clock, n=30:
+    40.63 ms  (p50; mean 40.56, 39.40 .. 41.47, SM clock sampled 2235-2265 MHz)
 ```
 
-**Those three lines use different rulers and must not be chained.** The ledger is a paired
+**Those numbers use different rulers and must not be chained.** The ledger is a paired
 chain: each row is its own A/B against the row above it, so the rows add up. The two tile
-changes landed after the ledger closed and were each measured against their own baseline
-with the SM clock locked, so `-0.73` and `-0.11` are *not* subtractable from `42.90`. The
-last line is the only number that describes main as you will run it: one process, clocks
+changes landed after the ledger closed, so neither is subtractable from `42.90` -- and the
+two are not established the same way. The retile is a locked paired A/B. The tile pin is
+not a paired A/B at all: `-0.106 ms` is an expectation over the tiles autotune was drawing
+for that shape, and the reason to pin is variance rather than mean -- it takes the
+draw-to-draw spread on this shape to zero, which is what makes any later A/B on it readable.
+The last line is the only number that describes main as you will run it: one process, clocks
 left alone, plain wall clock.
 
 <picture>
