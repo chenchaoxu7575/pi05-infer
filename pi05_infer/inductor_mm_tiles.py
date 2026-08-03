@@ -19,14 +19,21 @@ count -- which is why the search never finds the good corner on its own.
 
 This module appends a handful of deep-pipelined small-``BLOCK_M`` candidates
 **for those two shapes only** and lets inductor's own autotuner benchmark them
-against the stock list.  It picks ``BLOCK_M=16, BLOCK_N=64`` (or the equally
-fast ``32/32``) -- either way 64 CTAs instead of 32.  MEASURED in the model on
-RTX PRO 5000 Blackwell (sm_120, 110 SM), nsys 2026.1.2, 12 predicts::
+against the stock list.  The first round of this took ``BLOCK_M`` from 64 to 16
+or 32 -- 64 CTAs instead of 32.  MEASURED in the model on RTX PRO 5000 Blackwell
+(sm_120, 110 SM), nsys 2026.1.2, 12 predicts::
 
     down_proj  15.06 -> 11.71 us/call  (-22.2%, 591 -> 760 GB/s)
     o_proj      8.47 ->  6.94 us/call  (-18.1%, 530 -> 647 GB/s)
     denoise stream busy  11.48 -> 10.55 ms/predict; kernel counts unchanged
     e2e paired A/B, SM clock held equal: -0.88 ms/predict
+
+A second round then widened ``BLOCK_K`` to 256, which the first round could not
+reach because a module-level ``assert BLOCK_K == 128`` excluded the whole family
+from the search -- see the bit-exactness note.  The champion today is
+``(BLOCK_M, BLOCK_N, BLOCK_K, stages, warps) = (32, 32, 256, 4, 4)`` for both
+shapes; per-call figures are with ``_DEFAULT_CFGS`` below.  **The two rounds have
+separate baselines and do not chain.**
 
 **Bit-exactness.**  An earlier version of this module claimed that ``BLOCK_K``
 is the only tile parameter that changes the fp32 accumulation order and that
@@ -61,9 +68,11 @@ is the Triton champion the shipped patch already selects.
 **Scope.**  The patch replaces a name in ``torch._inductor.kernel.mm``, so it is
 process-global: any *other* model compiled in the same process whose GEMM also
 hits ``m <= 64`` with one of the listed ``(N, K)`` pairs gets the wider search
-too.  That stays algebraically and numerically exact (``BLOCK_K`` is pinned), but
-its kernel choice -- and therefore its output bits relative to an unpatched run --
-can move.  Narrow ``RLINF_SMALL_M_MM_SHAPES`` or set ``RLINF_SMALL_M_MM=0`` if
+too.  That stays algebraically exact, but its kernel choice -- and therefore its
+output bits relative to an unpatched run -- can move, and the digests below were
+taken on *these* shapes with *these* weights, so they say nothing about another
+model's.  There is no cheap version of this check: it is the whole reason the
+list is short.  Narrow ``RLINF_SMALL_M_MM_SHAPES`` or set ``RLINF_SMALL_M_MM=0`` if
 that matters.
 
 Kill switch: ``RLINF_SMALL_M_MM=0`` restores stock inductor behaviour.
@@ -89,7 +98,7 @@ stride is 0 and each byte of K/V is read once from DRAM.)
 Only ``P.V`` gets extra candidates, and the winning candidate is *not* the one
 the occupancy analysis predicted.  Measured in isolation on the real shapes,
 SM clock locked at 2092 MHz, kernel time from the CUDA profiler over 50 graph
-replays (``claude_mem/pi05_rollout_forward/kernel_fusion/probe_bmm_tile.py``)::
+replays of an isolated probe on the two real bmm shapes::
 
     P.V   stock champion  BM64 BN32 BK128 s5 w4   64 CTA   7.79 us
           appended        BM32 BN64 BK128 s4 w4   64 CTA   5.97 us  (-23.3%)

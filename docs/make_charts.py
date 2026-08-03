@@ -17,8 +17,10 @@ Every number plotted here is a measurement, and every measurement has a source:
   ``--sqlite-off`` to re-derive them instead of using the recorded values; the
   script prints what it derived so it can be diffed against the constants.
 
-Source notes live in ``claude_mem/pi05_rollout_forward/`` (not shipped in this
-repo); every hard-coded constant below carries its file:line.
+Every hard-coded constant below names the internal document it came from. Those
+notes are not published yet (see README.md), so the names are provenance, not
+links -- but the constants they justify are all reproducible from the profiles
+via ``--sqlite`` / ``--sqlite-off``.
 
 Design follows a validated categorical palette (blue / orange / aqua) that
 passes CVD separation, normal-vision separation and lightness-band checks in
@@ -36,8 +38,8 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.path import Path as MplPath  # noqa: E402
 from matplotlib.patches import PathPatch  # noqa: E402
+from matplotlib.path import Path as MplPath  # noqa: E402
 
 OUT = Path(__file__).resolve().parent
 
@@ -200,7 +202,7 @@ LEDGER = [
     ("fuse GeGLU and RoPE into the GEMM epilogue", 43.74, -1.05,
      "kernel_fusion/RESULTS_fusion.md (own paired A/B: 44.87 -> 43.74, -1.14)"),
     ("extract to a standalone package, graph on", 43.16, -0.58,
-     "20260728_stage1_pi05infer_pro5k/ab_stage1_summary.txt (paired 44.08 -> 43.16)"),
+     "20260728_stage1/ab_stage1_summary.txt (paired 44.08 -> 43.16)"),
     ("delete the timestep conditioning nothing reads", 42.90, -0.30,
      "20260728_adarms_cond/ab_summary.txt (paired 43.20 -> 42.90, sd 0.07, n=4)"),
 ]
@@ -208,114 +210,113 @@ LEDGER = [
 # --- panel 1: prehistory, the runs that came *before* the ledger -----------
 # ALL of these were taken on a DIFFERENT measurement harness: the full RLinf
 # Ray + EnvWorker training path with nsys attached, on a different box
-# (10.172.160.142, 4x RTX PRO 5000), 2026-07-03, nsys 2025.3.1.  e2e there is
-# "the sum of the per-phase CPU wall clocks under nsys"
-# (claude_mem/pi05_rollout_forward/nsys_sm120/README.md:104), NOT the plain
-# standalone wall clock the ledger uses.
+# (a 4x RTX PRO 5000 box), 2026-07-03, nsys 2025.3.1.  e2e there is "the sum of
+# the per-phase CPU wall clocks under nsys" (per the sm_120 profile notes), NOT
+# the plain standalone wall clock the ledger uses.
 #
 # The step from 58.9 to the 52.60 ledger baseline is therefore NOT an
 # optimization.  It is explicitly documented as a change of ruler:
-#   opt_validation/OPTIMIZATION_LOG.md:12  "纯推理基线(同上配置) | 53.1 ms |
+#   optimization log: "纯推理基线(同上配置) | 53.1 ms |
 #       换测法:去掉 Ray/worker 口径约 6ms | 纯推理"
-#   opt_validation/OPTIMIZATION_LOG.md:16-17  "两种测法别相减 ... 两者差约 6ms
-#       是测法口径,不是优化"  ("do not subtract the two rulers ... the ~6 ms
-#       difference is measurement scope, not an optimization")
-#   HANDOFF_min_infer_repro.md:13  "142 的 58.9 是 full-worker + nsys 口径"
+#   optimization log: "两种测法别相减 ... 两者差约 6ms 是测法口径,不是优化"
+#       ("do not subtract the two rulers ... the ~6 ms difference is
+#        measurement scope, not an optimization")
+#   minimal-repro handoff: "58.9 是 full-worker + nsys 口径"
 # Both sides run the *same* compile config (torch.compile max-autotune, RLinf
-# PR #968); PROFILES_INDEX.md:343 labels the E-series rep "#968 max-autotune".
+# PR #968); the profile index labels the E-series rep "#968 max-autotune".
 #
 # The source tree calls these runs E0..E3.  E1 and E2 are single-factor arms
 # off E0, NOT a cumulative chain: E2 still has the type checks ON
-# (nsys_sm120/README.md:96-102, column "typecheck关").  The deltas below are
-# therefore all measured against the compile-only arm.
+# (sm_120 profile notes, column "typecheck关").  The deltas below are therefore
+# all measured against the compile-only arm.
 #
 # (label, e2e_ms, delta_vs_compile_only, source)
 PREHISTORY = [
     ("run eager - no compiler at all", 270.6, None,
-     "PROFILES_INDEX.md:348 (opt_eager/)"),
+     "the profile index (opt_eager/)"),
     ("compile the graph: torch.compile max-autotune", 65.8, None,
-     "PROFILES_INDEX.md:349 (opt_E0/) - the prehistory baseline"),
+     "the profile index (opt_E0/) - the prehistory baseline"),
     ("skip the runtime type checks           (on its own)", 63.0, -2.8,
-     "PROFILES_INDEX.md:350 (opt_E1/)"),
+     "the profile index (opt_E1/)"),
     ("batch the 3 camera views into one ViT  (on its own)", 61.7, -4.1,
-     "PROFILES_INDEX.md:351 (opt_E2/)"),
+     "the profile index (opt_E2/)"),
     ("both of the above, on top of the compiler", 58.9, -6.9,
-     "PROFILES_INDEX.md:352 (opt_E3/) - -10.5% vs compile-only"),
+     "the profile index (opt_E3/) - -10.5% vs compile-only"),
 ]
 
 # --- panel 3: the same optimizations, counted per denoise step -------------
 # Ruler: GPU busy per denoise step = union of kernel intervals over the denoise
 # loop, / 10 steps.  At bs=1 nothing overlaps, so this equals the naive sum of
-# kernel durations (HEADTOHEAD_realtime_vla_pro5k.md:274), which is how the
+# kernel durations (the realtime-vla head-to-head), which is how the
 # later rows were measured (nsys 2026.1.2, stream 157).  All rows and BOTH
 # peers sit on this one ruler.
 #
-#   2025.6 / 347 k  MFU_denoise_analysis.md:93  "OURS baseline (pre-cache)",
+#   2025.6 / 347 k  the denoise MFU analysis  "OURS baseline (pre-cache)",
 #                   denoise-loop busy 20.256 ms/predict, kernels/step 347
-#   1620.9 / 346 k  MFU_denoise_analysis.md:94  "OURS + adaRMS cache",
+#   1620.9 / 346 k  the denoise MFU analysis  "OURS + adaRMS cache",
 #                   16.209 ms/predict - same table, same session => PAIRED
-#   1368.0 / 305 k  PROFILES_INDEX.md:142 = kernel_fusion/RESULTS_fusion.md:20
+#   1368.0 / 305 k  the profile index = the kernel-fusion results
 #                   (base.nsys-rep, both fusions off), 20 predicts
-#   1236.0 / 238 k  PROFILES_INDEX.md:146 = kernel_fusion/RESULTS_fusion.md:23
-#                   (f_guard.nsys-rep, shipped).  RESULTS_fusion.md:24 states
+#   1236.0 / 238 k  the profile index = the kernel-fusion results
+#                   (f_guard.nsys-rep, shipped).  the kernel-fusion results states
 #                   the delta as -132.0 (-9.6 %) => PAIRED with 1368.0
-#   1185.0 / 217 k  pi05-infer commit 62aa78e; docs/MEASUREMENTS.md:193,205.
+#   1185.0 / 217 k  pi05-infer commit 62aa78e; the measurement log,205.
 #                   Its own paired baseline is 1232.3 (prof_skip0, same
 #                   session), i.e. -47.3; on this chain the drop reads -51.0.
 #
 # Caveats deliberately encoded in the chart text:
 #   - row 2 lumps four optimizations and is CROSS-SESSION (07-25 -> 07-27), not
-#     a paired A/B.  Note also MFU_denoise_analysis.md:104: the captured graph
+#     a paired A/B.  Note also the denoise MFU analysis: the captured graph
 #     is *not* faster in GPU-busy terms - it converts idle into busy
 #     (idle/predict 3.74 -> 0.93 ms).  Its win shows up in wall clock, not here.
 #   - the 07-28 per-kernel census of the 238-kernel build reads 1232.6
-#     (HANDOFF_20260728.md:58) and its step_idle union reads 1233.3 - same
+#     (the 2026-07-28 handoff) and its step_idle union reads 1233.3 - same
 #     build as 1236.0, different session.  Not charted as a step.
 #   - the earlier rungs on the *wall-clock* ruler (2255 us/step at the
 #     2026-07-09 baseline; 2286 -> 1881 for the adaRMS pairing) are a different
 #     ruler and are left to the README prose rather than mixed in here.
 #   - NOT charted: the oldest figure, "2115 us/step @ 417 kernels"
-#     (HANDOFF_latency_investigation.md:39). Its source sqlite is not in the
-#     tree (PROFILES_INDEX.md:417), and 2.115 ms is exactly the
+#     (the latency-investigation handoff). Its source sqlite is not in the
+#     tree (the profile index), and 2.115 ms is exactly the
 #     `denoise/expert_forward` span in the sibling profile
-#     (RESULTS_bubble_timeline.md:113) while `denoise/loop` there is 2.255 - so
+#     (the bubble-timeline results) while `denoise/loop` there is 2.255 - so
 #     it is probably expert-only, a narrower scope than every other number
 #     here.  Left out rather than charted on a guess.
 #
 # (label, us_after, delta, kernels, paired?, source)
-DEN_BASE = (2025.6, 347, "MFU_denoise_analysis.md:93 (pre-adaRMS-cache baseline)")
+DEN_BASE = (2025.6, 347, "the denoise MFU analysis (pre-adaRMS-cache baseline)")
 DEN_LEDGER = [
     ("precompute the adaRMS modulation", 1620.9, -404.7, 346, True,
-     "MFU_denoise_analysis.md:94 (same table, same session)"),
+     "the denoise MFU analysis (same table, same session)"),
     ("merge Q/K/V, static KV, mask on GPU (+ the graph)", 1368.0, -252.9, 305, False,
-     "PROFILES_INDEX.md:142 - cross-session lump, four changes"),
+     "the profile index - cross-session lump, four changes"),
     ("fuse GeGLU and RoPE into the GEMM epilogue", 1236.0, -132.0, 238, True,
-     "kernel_fusion/RESULTS_fusion.md:24 (-132.0, -9.6%)"),
+     "the kernel-fusion results (-132.0, -9.6%)"),
     ("delete the timestep conditioning nothing reads", 1185.0, -51.0, 217, True,
-     "MEASUREMENTS.md:193 (own paired baseline 1232.3 -> 1185.0, -47.3)"),
+     "the measurement log (own paired baseline 1232.3 -> 1185.0, -47.3)"),
 ]
 
 # --- the two reference implementations, on both panel 2 and panel 3 --------
 # dexmal/realtime-vla @ b86a942, our config, our GPU, same day, real (non-zero)
-# weights, our e2e scope.  HEADTOHEAD_realtime_vla_pro5k.md:473 (scope B, n=30,
+# weights, our e2e scope.  the realtime-vla head-to-head (scope B, n=30,
 # sd 0.20) and :271 (1191.0 us/step, sd 13.2, 165 kernels/step).  The only
 # *paired* head-to-head we have is that same line: theirs 43.41 vs ours-that-day
 # 44.55, i.e. theirs faster by 1.14 ms; and 1191.0 vs our 1368.7 that day.
 PEER_MS = 43.41
 PEER_US, PEER_KERN = 1191.0, 165
 # limxdynamics/FluxVLA @ 7f9f774 - a DIFFERENT repo from dexmal/realtime-vla.
-# opt_validation/fluxvla_baseline.md:20 - 44.9 ms/predict at 968 prefix tokens
+# the FluxVLA baseline notes - 44.9 ms/predict at 968 prefix tokens
 # (their own default is a lighter 560-token config that runs 31.1 ms; that one
 # must never be compared against our 968-token numbers).  1419.0 us/step and
-# ~205 kernels/step: MFU_denoise_analysis.md:96,98 - the same table and the
+# ~205 kernels/step: the denoise MFU analysis,98 - the same table and the
 # same ruler as our 2025.6 / 1620.9 rows.
 # NOT config-matched to us, in both directions:
-#   - chunk 10, not 50 (HEADTOHEAD_realtime_vla_pro5k.md:456) -> cheaper for them
+#   - chunk 10, not 50 (the realtime-vla head-to-head) -> cheaper for them
 #   - their timer skips the CPU preprocessing ours includes, ~2-3 ms
-#     (opt_validation/fluxvla_baseline.md:10-11)        -> cheaper for them
+#     (the FluxVLA baseline notes)        -> cheaper for them
 #   - their loop recomputes adaRMS + the time MLP every step and does a device
-#     sync per call (HEADTOHEAD_realtime_vla_pro5k.md:451-455) -> costlier
-# PROFILES_INDEX.md:437-441 retracts the old "their code at our config =
+#     sync per call (the realtime-vla head-to-head) -> costlier
+# the profile index retracts the old "their code at our config =
 # 44.89 ms, dead heat" reading of this run: what was retracted is the
 # *attribution* (wrong repo) and the "dead heat" verdict, not the measurement.
 FLUX_MS = 44.9
@@ -645,7 +646,7 @@ def chart_denoise(mode: str) -> None:
 # --------------------------------------------------------------------------
 # Chart 3 - phase split of GPU busy time
 # --------------------------------------------------------------------------
-# Source: 20260728_stage1_pi05infer_pro5k/stage1_off.sqlite, 12 predicts.
+# Source: 20260728_stage1/stage1_off.sqlite, 12 predicts.
 # Streams: 7 = PaliGemma prefix LM, 157 = denoise expert (inductor cudagraph),
 # 158 = SigLIP vision tower.  The --stage1 build merges 158 into 7 and pulls the
 # eager glue into 157, so the three-way split is read off the off arm; total GPU

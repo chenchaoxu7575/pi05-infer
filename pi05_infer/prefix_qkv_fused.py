@@ -53,7 +53,8 @@ MEASURED in the model, nsys 2026.1.2, 12 predicts, SM clock locked at 2100 MHz::
     denoise stream 157       11832.2 -> 11829.4 us/predict   1630 kernels, unchanged
     e2e paired A/B, 12 rounds, clock pinned   -0.75 +- 0.23 ms  (t = -3.2, 9/12)
 
-Full write-up: ``claude_mem/pi05_rollout_forward/results/RESULTS_prefix_qkv_geglu.md``.
+Full write-up lives in the (unpublished) internal record; the measurements it turns
+on are reproduced above and gated by ``tools/bitexact_prefix_qkv.py``.
 The companion idea -- fusing the GeGLU into the MLP GEMM's epilogue, which pays on
 the action expert -- was measured and is a **null on the prefix**: the gate/up GEMMs
 already run at 188 TFLOP/s through cuBLAS (~92 % of this card's achievable bf16 peak

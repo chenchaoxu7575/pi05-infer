@@ -8,7 +8,7 @@
 #
 # nsys 2026 profile + sqlite export, both with the SAME binary: nsys 2025.x cannot
 # read its own output on this GPU. Adapted from
-# claude_mem/pi05_rollout_forward/impl/kernel_fusion/scripts/prof.sh.
+# the internal kernel-fusion profiling script.
 set -x
 TAG=$1
 ARM=${2:-pi05infer}

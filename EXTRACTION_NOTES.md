@@ -12,19 +12,23 @@ byte-identical to the checkout deployed in the `pi05bench` container.
 
 ## 0. The environment claim in the task brief was wrong
 
-The brief said `/workspace/rlinf_pub/pi05-infer/` is "visible from BOTH the analysis
-box and inside the container". It is not — the two `/workspace/rlinf_pub` trees are on
-different machines:
+The brief said one working tree was "visible from BOTH the analysis box and inside
+the container". It is not — the extraction ran across **two machines** whose trees
+happen to share a path prefix:
 
-| namespace | real path |
+| namespace | role |
 |---|---|
-| analysis box `h20-8` | `/workspace/rlinf_pub/pi05-infer` (this is where the git repo lives) |
-| GPU box `b4696b4-lcedt`, host | `/home/chenchaox/project/RLinf_pi0.5_inference/pi05-infer` |
-| GPU box, inside `pi05bench` | `/workspace/rlinf_pub/pi05-infer` (bind mount of the above) |
+| analysis box | where the git repo lives; no GPU of the target architecture |
+| GPU box, host | a second copy of the tree |
+| GPU box, inside the benchmark container | a bind mount of the above |
 
-The repo path matches the brief inside the container, which is what the code needs.
-The two copies are kept in sync by `tar | ssh`; the git history lives on the analysis
-box and is mirrored to the GPU box. `rsync` is not installed on the analysis box.
+The container's path matches the brief, which is what the code needs. The two copies
+are kept in sync by `tar \| ssh`; the git history lives on the analysis box and is
+mirrored to the GPU box.
+
+**This is why the notes below keep insisting on which box a number came from.** Nothing
+here is a general lesson — it is the specific reason several early figures could not be
+reconciled: they were taken on different machines under the same-looking path.
 
 Related: the GPU box's copy of `RLinf-pi05-nsys-profile` is **not a git repository** —
 it is an unpacked tree. Its `openpi_action_model.py` is byte-identical
@@ -130,7 +134,7 @@ Beyond import rewrites, logging and dead-RL-code deletion, the following changed
 | `_vendored/base_policy.py` | one import line rewritten to `pi05_infer._vendored.cuda_graph` | verbatim otherwise |
 | `dataconfig/{turtle,libero}_dataconfig.py` | one import line each rewritten to `pi05_infer.dataconfig.policies` | verbatim otherwise |
 | `tools/bitgate.py` | the hard-coded gemma directory became `sys.argv[1]` with the original as default | so the rescued copy can be gated too |
-| `tools/ksum.py` | none | verbatim from `claude_mem/pi05_rollout_forward/kernel_fusion/scripts/ksum.py` |
+| `tools/ksum.py` | none | verbatim from the internal kernel-fusion scripts |
 
 `tools/prof.sh`, `tools/stream_summary.py`, `tools/denoise_kernels.py` and
 `tools/ab_rlinf_reference.py` are new (written for this extraction's verification);
@@ -182,8 +186,8 @@ reachable from the two retained data configs and was not vendored.
   window past that point picks up the next predict's prefix instead. Since the RLinf
   arm — the code the 238 figure was recorded against — also measures 234.90, the gap
   is a definition difference in the counting method, not a regression. If you need the
-  exact historical number back, find the script that produced it; it was not in
-  `claude_mem/pi05_rollout_forward/kernel_fusion/scripts/`.
+  exact historical number back, find the script that produced it; it was not among
+  the internal kernel-fusion scripts.
 - **"1236 µs/step" denoise.** Under nsys with `--gpu-metrics-devices` the measured GPU
   busy time is 1135.8 µs/step on stream 157 alone and 1613 µs/step summing streams 157
   and 158 (which overlap). Neither reproduces 1236 µs directly; both are identical
@@ -199,8 +203,7 @@ reachable from the two retained data configs and was not vendored.
 
 ### 6.1 `36` prefix-KV D2D copies per predict is the *optimised* signature — not a regression
 
-Investigated 2026-07-28 after a profile of this package
-(`claude_mem/pi05_rollout_forward/20260728_pi05infer_vendored_pro5k/`) was read as evidence
+Investigated 2026-07-28 after a profile of this package was read as evidence
 that the static KV buffer had been lost in the extraction. It had not. Recorded here because
 the number invites exactly that misreading a second time.
 
@@ -250,7 +253,7 @@ would have to be re-validated against the graph capture.
 
 **Updated 2026-07-28:** `bench/standalone_infer_bench.py --stage1` now *does* call
 `capture_cuda_graph`, so this path is exercised and appears in
-`20260728_stage1_pi05infer_pro5k/stage1_on.nsys-rep`. The dead-copy observation stands and
+the 2026-07-28 Stage-1 profile. The dead-copy observation stands and
 is still not acted on; the measured Stage-1 win (−0.93 ms/predict paired) is large enough
 that a sub-0.1 ms follow-up is not worth risking the capture over. See README
 "Measured 2026-07-28, `--stage1`".
@@ -408,7 +411,7 @@ prefix GemmaModel / decoder layer / attention / MLP / RMSNorm
                                            transformers.models.gemma.modeling_gemma
 prefix PaliGemma       transformers.models.paligemma.modeling_paligemma
 prefix vision tower    transformers.models.siglip.modeling_siglip
-expert _FUSED_OPS      /workspace/rlinf_pub/pi05-infer/pi05_infer/gemma/rlinf_fused_denoise.py
+expert _FUSED_OPS      <repo>/pi05_infer/gemma/rlinf_fused_denoise.py
 torch.ops.pi05_infer.{gate_up_geglu,qkv_rope_kv}   True
 ISOLATION_OK
 ```

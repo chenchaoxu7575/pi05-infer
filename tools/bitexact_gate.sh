@@ -11,7 +11,7 @@
 # reduction's R0_BLOCK/num_warps moves, the accumulation split moves with it, and two
 # processes running byte-identical code disagree in the last bits -- measured at up to
 # 3.6e-3 on the [1,50,6] actions (1.5% of their range). See
-# claude_mem/pi05_rollout_forward/results/RESULTS_dump_actions_determinism.md.
+# the internal dump-actions determinism study.
 #
 # So this driver runs FOUR processes: each arm twice. The cross-arm comparison is only
 # reported once both same-arm controls are clean; otherwise the verdict is INCONCLUSIVE,
