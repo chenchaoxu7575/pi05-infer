@@ -1,8 +1,14 @@
 pi05-infer
-Copyright 2026 Chenchao Xu
 
-This product includes software developed by third parties, redistributed
-under the Apache License, Version 2.0 (see LICENSE).
+Extracted from RLinf (https://github.com/RLinf/RLinf) and built on openpi
+(https://github.com/Physical-Intelligence/openpi, via the RLinf/openpi fork) and
+HuggingFace Transformers. This product includes software developed by third
+parties, redistributed under the Apache License, Version 2.0 (see LICENSE).
+
+The files listed below are vendored copies or derivatives and carry their
+original copyright notices in their headers; those notices are retained as
+Apache-2.0 requires. Files original to this project carry the licence grant
+without a copyright line.
 
 ================================================================================
 Provenance: vendored code and per-file modifications

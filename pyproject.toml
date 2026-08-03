@@ -9,7 +9,6 @@ description = "Standalone pi0.5 / pi0 bs=1 inference path extracted from RLinf"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10,<3.12"
-authors = [{ name = "Chenchao Xu" }]
 keywords = ["pi0", "vla", "inference", "triton", "torch-compile", "robotics"]
 classifiers = [
     "Development Status :: 4 - Beta",
