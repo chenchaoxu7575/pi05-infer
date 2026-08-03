@@ -97,14 +97,41 @@ RLinf-Pi05-LIBERO-SFT/
 `physical-intelligence/libero`。如果 `--model-path` 指向的 checkpoint asset id 不同,
 权重会正常加载,**失败会推迟到后面找不到 norm_stats 时才出现**。
 
-用现成的 RLinf benchmark 容器镜像,**不需要重建 Docker**。editable 安装,并且带
-`--no-deps`,以免动到容器里钉死的 torch / transformers / openpi:
+### 运行环境
+
+`pyproject.toml` 里的 `dependencies = []` 是刻意的:这个包用 `--no-deps` 装进一个
+**已有的 openpi 环境**,那个环境里的 torch 构建不能被动。该环境需要满足:
+
+| 组件 | 要求 |
+|---|---|
+| Python | `>=3.10,<3.12`;实际开发与运行用的是 3.11 |
+| PyTorch | 本仓库开发所在的 openpi 环境里是 **2.6.0**(Triton 3.2.0)。必须是能面向 sm_120 的构建 -- `2.6.0+cu124` 那个 wheel 只编到 sm_50..sm_90,在 GB202 上根本跑不起来;而上面那些数字所用的确切构建号,本仓库没有记录。 |
+| openpi | 必须是**打了 `transformers_replace` 补丁**的安装 -- openpi 自己的 `install.sh` 会做这件事 |
+| transformers | 4.53.2,并且是被 openpi 改过的那份,不是原版(见下) |
+| 其他被 import 的 | `numpy`、`einops`、`nvtx`。`nvtx` 没有别的东西会带进来 -- openpi 不依赖它,而少了它 `import pi05_infer` 就会失败。 |
+
+**`transformers_replace` 不是可选项。** PaliGemma 的 prefix 是刻意留在原厂 transformers
+上、而不是走 vendoring 的 `pi05_infer.gemma` 的,这意味着它是通过 `AutoModel.from_config`
+从 `site-packages` 里构造出来、然后被带着 `adarms_cond=` 调用的。这个参数以及整套 adaRMS
+API 正是 openpi 的替换文件加进去的;在原版 upstream transformers 上,这个调用会直接报错。
+所以这里说的"干净的 site-packages"指的是**装了 openpi 的**,不是上游原版 --
+完整的边界说明见 [`EXTRACTION_NOTES.md`](EXTRACTION_NOTES.md)。
+
+如果你手上有 RLinf benchmark 容器镜像,上面这些它里面都已经有了,**不需要重建 Docker**。
+
+### 安装
+
+editable 安装,并且带 `--no-deps`,以免动到环境里的 torch / transformers / openpi 构建:
 
 ```bash
+# 在容器里
 docker exec -w /path/to/pi05-infer pi05bench \
     /opt/venv/openpi/bin/pip install -e . --no-deps --no-build-isolation
 
-# 基准测试
+# 或者直接在一个满足上表的 openpi 环境里
+pip install -e . --no-deps --no-build-isolation
+
+# 基准测试(容器里的解释器;容器外用普通的 `python`)
 /opt/venv/openpi/bin/python bench/standalone_infer_bench.py \
     --model-path $PI05_MODEL_PATH --config-name pi05_turtle --iters 30
 ... --stage1        # 开启手写的去噪 CUDA 图(opt-in;台账第 7 行之后的数字都开着它测)

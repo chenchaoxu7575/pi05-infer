@@ -110,15 +110,45 @@ resolve to `physical-intelligence/libero`. If you point `--model-path` at a
 checkpoint whose asset id differs, the weights load and the run fails later on the
 missing stats.
 
-Use the existing RLinf benchmark container image -- **no Docker rebuild required**. Install
-editable and with `--no-deps`, so the torch / transformers / openpi versions pinned inside
-the container are left alone:
+### Environment
+
+`pyproject.toml` declares `dependencies = []` deliberately: this package installs with
+`--no-deps` into an **existing openpi environment**, whose torch build must not be
+touched. That environment has to provide:
+
+| component | requirement |
+|---|---|
+| Python | `>=3.10,<3.12`; developed and run on 3.11 |
+| PyTorch | **2.6.0** (Triton 3.2.0) in the openpi environment this repository is developed in. It must be a build that targets sm_120 -- a `2.6.0+cu124` wheel compiles for sm_50..sm_90 only and cannot run on a GB202 at all, and the exact build used for the numbers above is not recorded in this repository. |
+| openpi | installed **with its `transformers_replace` patch applied** -- openpi's own `install.sh` does this |
+| transformers | 4.53.2, as patched by openpi; not a vanilla install (below) |
+| also imported | `numpy`, `einops`, and `nvtx`. `nvtx` is a direct dependency of nothing else here -- openpi does not pull it in, and `import pi05_infer` fails without it. |
+
+**`transformers_replace` is not optional.** The PaliGemma prefix deliberately runs on stock
+transformers rather than on the vendored `pi05_infer.gemma`, which means it is built through
+`AutoModel.from_config` out of `site-packages` and then called with `adarms_cond=`. openpi's
+replacement files are what add that argument, along with the rest of the adaRMS API; on a
+vanilla upstream transformers the call raises. So "pristine site-packages" here means
+openpi-installed, not upstream-vanilla -- [`EXTRACTION_NOTES.md`](EXTRACTION_NOTES.md) has
+the full boundary.
+
+If you have the RLinf benchmark container image, all of the above is already inside it and
+**no Docker rebuild is required**.
+
+### Install
+
+Install editable and with `--no-deps`, so the torch / transformers / openpi builds in the
+environment are left alone:
 
 ```bash
+# in the container
 docker exec -w /path/to/pi05-infer pi05bench \
     /opt/venv/openpi/bin/pip install -e . --no-deps --no-build-isolation
 
-# benchmark
+# or, directly in an openpi environment that satisfies the table above
+pip install -e . --no-deps --no-build-isolation
+
+# benchmark (the container's interpreter; plain `python` outside it)
 /opt/venv/openpi/bin/python bench/standalone_infer_bench.py \
     --model-path $PI05_MODEL_PATH --config-name pi05_turtle --iters 30
 ... --stage1        # enable the hand-captured denoise CUDA graph (opt-in; every number
