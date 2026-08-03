@@ -79,10 +79,14 @@ export PI05_MODEL_PATH=/path/to/RLinf-Pi05-LIBERO-SFT
 
 ```
 RLinf-Pi05-LIBERO-SFT/
-  model*.safetensors  (+ model.safetensors.index.json)
-  config.json
-  <asset_id>/norm_stats.json      # asset_id 来自 --config-name 指定的 TrainConfig
+  model.safetensors
+  physical-intelligence/libero/norm_stats.json
 ```
+
+第二条路径就是 openpi 的 `<asset_id>/norm_stats.json`,asset id 来自 `--config-name`
+指定的 TrainConfig —— `pi05_turtle` 和 LIBERO 系列的 config 都解析到
+`physical-intelligence/libero`。如果 `--model-path` 指向的 checkpoint asset id 不同,
+权重会正常加载,**失败会推迟到后面找不到 norm_stats 时才出现**。
 
 用现成的 RLinf benchmark 容器镜像,**不需要重建 Docker**。editable 安装,并且带
 `--no-deps`,以免动到容器里钉死的 torch / transformers / openpi:

@@ -89,10 +89,15 @@ statistics under an asset-id subdirectory:
 
 ```
 RLinf-Pi05-LIBERO-SFT/
-  model*.safetensors  (+ model.safetensors.index.json)
-  config.json
-  <asset_id>/norm_stats.json      # asset_id comes from the --config-name TrainConfig
+  model.safetensors
+  physical-intelligence/libero/norm_stats.json
 ```
+
+The second path is openpi's `<asset_id>/norm_stats.json`, and the asset id comes
+from the `--config-name` TrainConfig -- `pi05_turtle` and the LIBERO configs both
+resolve to `physical-intelligence/libero`. If you point `--model-path` at a
+checkpoint whose asset id differs, the weights load and the run fails later on the
+missing stats.
 
 Use the existing RLinf benchmark container image — **no Docker rebuild required**. Install
 editable and with `--no-deps`, so the torch / transformers / openpi versions pinned inside
