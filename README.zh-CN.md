@@ -2,245 +2,135 @@
 
 # pi05-infer
 
-**pi0.5 动作专家(action expert)的独立 bs=1 推理引擎**,从
-[RLinf](https://github.com/RLinf/RLinf) 里抽出来,针对 **RTX PRO 5000(GB202 / sm_120,
-Blackwell)** 做过一轮系统性优化。每一项都是代数等价变换 -- **不量化、不换采样器、不减去噪步数**。
+**pi0.5 动作专家的独立 bs=1 推理引擎**,从 [RLinf](https://github.com/RLinf/RLinf)
+抽出,针对 **RTX PRO 5000(GB202 / sm_120)** 优化。每一项改动都是代数等价变换:
+不量化、不换采样器、不减去噪步数。
 
 ## 成果
 
-端到端 `predict_action_batch`,在上面那张卡上:
-
-```
-台账(8 项优化的配对 A/B 链,plain wall clock):
-    52.60 -> 42.90 ms  (-18.4%)
-
-台账之后的两项 tile 改动,各自有各自的基线:
-    down_proj / o_proj 重 tile   -0.52 +/- 0.28 ms   锁频配对 A/B,4/4 轮同号
-    Q*K^T tile 钉死              -0.106 ms           期望值,不是配对 A/B
-
-当前 main,不锁频 plain wall clock,n=30:
-    40.63 ms(p50;mean 40.56,39.40 .. 41.47,SM 时钟采样 2235-2265 MHz)
-```
-
-**这些数用的是不同的尺,不能首尾相接。** 台账是配对链:每一行都是对上一行的 A/B,
-所以行与行可以相加。两项 tile 改动是台账收口之后落地的,都**不能**从 `42.90` 上减 --
-而且这两项的成立方式并不一样。重 tile 是一次锁频配对 A/B。tile 钉死则根本不是配对 A/B:
-`-0.106 ms` 是在 autotune 当时会抽到的那组 tile 上取的期望值;钉死的真正目的也不是均值
-而是方差 -- 它把这个 shape 上的抽样波动压到零,后面在它上面做的任何 A/B 才有可读性。
-最后一行是唯一一个描述"你实际跑起来的 main"的数:单进程、不动时钟、plain wall clock。
-
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/ledger_dark.png">
-  <img alt="优化台账三栏:仓库之前的前史(另一把尺)、52.60 到 42.90 ms 的端到端配对瀑布图、同样优化按去噪单步记的账" src="docs/ledger_light.png">
+  <img alt="配对 A/B 测出的加速,按三类拆开:CPU 开销、去噪步冗余削减、kernel 融合与调优" src="docs/ledger_light.png">
 </picture>
 
-三栏用的是**三把不同的尺**:本仓库开始之前的前史(另一套测量口径)、本仓库的端到端配对台账、
-以及同样这些优化按一个去噪步的 **GPU busy** 记的账。
+当前 `main`,不锁频 plain wall clock,n=30:**40.63 ms**(p50;mean 40.56,
+39.40 .. 41.47,SM 时钟采样 2235-2265 MHz)。
 
-图里那两条虚线标的是两个参考实现的位置。**一条虚线横穿瀑布图并不构成配对比较** --
-台账各行是分散在数周里、各自对着各自的基线测出来的 -- 所以这些图上读不出胜负。
-每个参考数字的来历、以及哪些条件对齐了哪些没有,记在 `docs/make_charts.py` 的注释里。
+> 台账、台账之后的两项 tile 改动、以及上面这个数,用的是三把不同的尺,不能相加。
+> 只有最后一行描述的是你实际跑起来的 `main`。
 
 <details>
-<summary>一个去噪步花在哪里,以及为什么天花板在 prefix</summary>
+<summary>一个去噪步花在哪里</summary>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/denoise_dark.png">
   <img alt="单个去噪步的逐核分解" src="docs/denoise_light.png">
 </picture>
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/phases_dark.png">
-  <img alt="阶段占比:968 token 的 prefix 占 GPU busy 的 71.7%,去噪循环占 28.3%" src="docs/phases_light.png">
-</picture>
-
-两张图都标了自己代表的 commit 与 profile 日期,**都没有对当前 main 重新推导** --
-原因见 `docs/make_charts.py` 里的说明。第二张图是这个项目的上界所在:
-**968 token 的 prefix 占 GPU busy 的 71.7%,所以哪怕去噪循环免费,整个 predict 也只能快 1.39x。**
+图上标了它代表的 commit,没有对当前 `main` 重新推导。逐核的当前快照在
+[`docs/kernels/`](docs/kernels/)。968 token 的 prefix 占 GPU busy 的 71.7%,
+所以哪怕去噪循环免费,整个 predict 也只能快 1.39x。
 
 </details>
 
 ## 硬件
 
-这里所有的数字、调优结果和验证,都只在**一张卡**上做过:RTX PRO 5000 Blackwell
-(GB202 / sm_120),110 SM,96 MB L2,300 W 功耗墙。
+所有数字、调优与验证都只在**一张卡**上做过:RTX PRO 5000 Blackwell(sm_120),
+110 SM,96 MB L2,300 W 功耗墙。换任何别的 GPU,性能数字和 bit-exactness digest
+都不成立 -- "bit-identical" 是相对**这张卡**未打补丁的构建定义的,而在别的卡上
+那个参照本身就是另一个 kernel。
 
-**换任何一张别的 GPU,性能结论和 bit-exactness 结论都同时失效** -- 而后半句才是反直觉的那半。
-inductor 的 tile 选择是针对这张卡的 roofline 拐点和 SM 数调的,不可迁移是意料之中;
-但这里的"bit-identical"指的是**与未打补丁的构建在这张卡上产出的结果逐位相同**,
-而未打补丁的构建**在别的卡上会选中另一个 kernel** -- 参照系本身动了,这个声明在那边没有主语。
+不拦你:引擎会警告一次,硬件相关的 tile pin 在非 sm_120 上自己拒绝安装,
+大部分优化带 `RLINF_*=0` kill switch。
 
-代码不会拦你。它只警告一次,硬件相关的 tile pin 在非 sm_120 上会自己拒绝安装,
-大部分优化带 `RLINF_*=0` kill switch(有四项结构性优化没有 -- 见下面的"验证"一节)。
-引用这里任何一个数之前,请先在你的卡上重跑 [`tools/`](tools/README.md) 里的 gate。
+## 安装
 
-## 安装与运行
+`pyproject.toml` 故意写 `dependencies = []` -- 本包用 `--no-deps` 装进一个已有的
+**openpi** 环境,那里的 torch 构建不能被动。该环境需要提供:
 
-你需要一个 checkpoint。已发布的 SFT checkpoint 可以直接用,例如
-[`RLinf/RLinf-Pi05-LIBERO-SFT`](https://huggingface.co/RLinf/RLinf-Pi05-LIBERO-SFT):
+| | |
+|---|---|
+| Python | `>=3.10,<3.12` |
+| PyTorch | **2.7.1+cu128**,上面的数字就是在这个构建上测的。任何构建都行,只要面向 sm_120;`+cu124` 的 wheel 只编到 sm_50..sm_90,在 GB202 上跑不起来。 |
+| openpi | 必须**带 `transformers_replace` 补丁**安装(openpi 自己的 `install.sh` 会做)。prefix 跑在原厂 transformers 上并会被传 `adarms_cond=`,而未打补丁的 transformers 不接受这个参数。 |
+| transformers | 4.53.2,openpi 打过补丁的那份 |
+| 还会 import | `numpy`、`einops`、`nvtx` |
+
+RLinf 的 benchmark 容器里这些已经齐了。
 
 ```bash
-huggingface-cli download RLinf/RLinf-Pi05-LIBERO-SFT --local-dir /path/to/RLinf-Pi05-LIBERO-SFT
-export PI05_MODEL_PATH=/path/to/RLinf-Pi05-LIBERO-SFT
+pip install -e . --no-deps --no-build-isolation
+
+huggingface-cli download RLinf/RLinf-Pi05-LIBERO-SFT --local-dir /path/to/ckpt
+export PI05_MODEL_PATH=/path/to/ckpt
 ```
 
-加载器期望的目录结构是 safetensors 分片,加上放在 asset-id 子目录下的 openpi 归一化统计量:
+checkpoint 目录需要权重,加上放在 asset id 下的 openpi 归一化统计量:
 
 ```
-RLinf-Pi05-LIBERO-SFT/
+ckpt/
   model.safetensors
   physical-intelligence/libero/norm_stats.json
 ```
 
-第二条路径就是 openpi 的 `<asset_id>/norm_stats.json`,asset id 来自 `--config-name`
-指定的 TrainConfig -- `pi05_turtle` 和 LIBERO 系列的 config 都解析到
-`physical-intelligence/libero`。如果 `--model-path` 指向的 checkpoint asset id 不同,
-权重会正常加载,**失败会推迟到后面找不到 norm_stats 时才出现**。
-
-### 运行环境
-
-`pyproject.toml` 里的 `dependencies = []` 是刻意的:这个包用 `--no-deps` 装进一个
-**已有的 openpi 环境**,那个环境里的 torch 构建不能被动。该环境需要满足:
-
-| 组件 | 要求 |
-|---|---|
-| Python | `>=3.10,<3.12`;实际开发与运行用的是 3.11 |
-| PyTorch | **2.7.1+cu128** -- 上面每一个数字都是在这个构建上测的。`bench/standalone_infer_bench.py` 会打印自己跑在哪个版本上,所以重跑会记录它自己的。任何构建都可以,只要面向 sm_120:`+cu124` 的 wheel 只编到 sm_50..sm_90,在 GB202 上根本跑不起来。 |
-| openpi | 必须是**打了 `transformers_replace` 补丁**的安装 -- openpi 自己的 `install.sh` 会做这件事 |
-| transformers | 4.53.2,并且是被 openpi 改过的那份,不是原版(见下) |
-| 其他被 import 的 | `numpy`、`einops`、`nvtx`。`nvtx` 没有别的东西会带进来 -- openpi 不依赖它,而少了它 `import pi05_infer` 就会失败。 |
-
-**`transformers_replace` 不是可选项。** PaliGemma 的 prefix 是刻意留在原厂 transformers
-上、而不是走 vendoring 的 `pi05_infer.gemma` 的,这意味着它是通过 `AutoModel.from_config`
-从 `site-packages` 里构造出来、然后被带着 `adarms_cond=` 调用的。这个参数以及整套 adaRMS
-API 正是 openpi 的替换文件加进去的;在原版 upstream transformers 上,这个调用会直接报错。
-所以这里说的"干净的 site-packages"指的是**装了 openpi 的**,不是上游原版 --
-完整的边界说明见 [`EXTRACTION_NOTES.md`](EXTRACTION_NOTES.md)。
-
-如果你手上有 RLinf benchmark 容器镜像,上面这些它里面都已经有了,**不需要重建 Docker**。
-
-### 安装与基准测试
-
-editable 安装,并且带 `--no-deps`,以免动到环境里的 torch / transformers / openpi 构建:
+## 运行
 
 ```bash
-# 在容器里
-docker exec -w /path/to/pi05-infer pi05bench \
-    /opt/venv/openpi/bin/pip install -e . --no-deps --no-build-isolation
-
-# 或者直接在一个满足上表的 openpi 环境里
-pip install -e . --no-deps --no-build-isolation
-
-# 基准测试(容器里的解释器;容器外用普通的 `python`)
-/opt/venv/openpi/bin/python bench/standalone_infer_bench.py \
-    --model-path $PI05_MODEL_PATH --config-name pi05_turtle --iters 30
-... --stage1        # 开启手写的去噪 CUDA 图(opt-in;台账第 7 行之后的数字都开着它测)
+python bench/standalone_infer_bench.py --config-name pi05_turtle --iters 30
+... --stage1        # 手写的去噪 CUDA 图(opt-in)
 ... --phases        # 分阶段耗时
-... --dump-actions /tmp/a.pt --clocks-json /tmp/clocks.json   # 数值 A/B + SM 时钟/功耗
+... --dump-actions /tmp/a.pt --clocks-json /tmp/clocks.json
 ```
 
-`pi05-infer` 不碰 `site-packages`(只加一条 path entry),所以容器保持原状,可以作为 A/B
-的参考臂。
+## 验证
 
-`--stage1` 会把 `max-autotune` 改写成 `max-autotune-no-cudagraphs`,并在 warmup 之后
-**断言**图确实捕获成功,没捕获就直接让这次运行失败。这个检查存在的原因是它要抓的失败是隐形的:
-shape signature 对不上时会退回 eager 去噪循环,**除了运行时间之外没有任何症状**。
-
-## 验证:数值一致性
+每一项优化都有一个 gate,跑两个臂并比对字节级 digest。
 
 ```bash
-export PI05_MODEL_PATH=/path/to/RLinf-Pi05-LIBERO-SFT
-export CUDA_VISIBLE_DEVICES=0     # 否则 run_bitexact_backfill.sh 默认去用 GPU 1
+export PI05_MODEL_PATH=/path/to/ckpt
+export CUDA_VISIBLE_DEVICES=0
 
-python tools/isolation_check.py          # expert = pi05_infer.gemma,prefix = transformers
-
-# 同进程 gate:一条命令跑完两个臂,并打印两个 digest
-python tools/bitgate.py                  # 两个 Triton 融合核
-python tools/bitexact_prefix_qkv.py      # prefix QKV 融合
-
-# 一个臂一个进程,两个臂共用同一个 inductor cache 目录 -- 分开的 cache 会让 autotune
-# 对没动过的 shape 重新选型,历史上出过符号相反的结果。两个 digest 必须相同。
-TORCHINDUCTOR_CACHE_DIR=/tmp/ti_be RLINF_SMALL_M_MM=0 python tools/bitexact_denoise_gemms.py
-TORCHINDUCTOR_CACHE_DIR=/tmp/ti_be RLINF_SMALL_M_MM=1 python tools/bitexact_denoise_gemms.py
-
-TORCHINDUCTOR_CACHE_DIR=/tmp/ti_be RLINF_SMALL_M_BMM=0 python tools/bitexact_denoise_bmms.py
-TORCHINDUCTOR_CACHE_DIR=/tmp/ti_be RLINF_SMALL_M_BMM=1 python tools/bitexact_denoise_bmms.py
-
-# prefix 跳最后一层:两个臂各写一份 JSON,再用第三条命令比对
-TORCHINDUCTOR_CACHE_DIR=/tmp/ti_kv RLINF_SKIP_LAST_LM_LAYER=0 \
-  python tools/bitexact_prefix_kv.py --out off.json
-TORCHINDUCTOR_CACHE_DIR=/tmp/ti_kv RLINF_SKIP_LAST_LM_LAYER=1 \
-  python tools/bitexact_prefix_kv.py --out on.json
-python tools/bitexact_prefix_kv.py --compare off.json on.json
-
-# 编译路径上的结构性优化(冻结 prefix + 四进程空对照门):一次一个 stage,并且 `prefix`
-# 必须先跑 -- 它写出的冻结 prefix 是 adarms / adarms_eager / qkv / kvstatic 要回放的。
-# 先跑后面那几个不会报错,只会安静地得到一个更弱的 gate。
-bash tools/run_bitexact_backfill.sh prefix
-bash tools/run_bitexact_backfill.sh adarms      # 然后 adarms_eager | qkv | kvstatic
-bash tools/run_bitexact_backfill.sh siglip      # 与冻结 prefix 无关
-bash tools/run_bitexact_backfill.sh attmask     # 同上 -- 它本身就在 prefix 里面
-RLINF_ROOT=/path/to/RLinf \
-  bash tools/run_bitexact_backfill.sh extraction   # 需要另外一份 RLinf checkout
-
-# 端到端数值 A/B -- WARNING: 四进程,必须带空对照;两个同臂对照不干净就判 INCONCLUSIVE,绝不判 PASS
-GATE_OFF="RLINF_SMALL_M_MM=0" GATE_ON="RLINF_SMALL_M_MM=1" \
-  tools/bitexact_gate.sh /tmp/gate_small_m --stage1 --iters 1 --warmup 4
+python tools/isolation_check.py     # expert = pi05_infer.gemma,prefix = transformers
+python tools/bitgate.py             # 两个 Triton 融合核
+python tools/bitexact_prefix_qkv.py # prefix QKV 融合
 ```
 
-`bitgate.py` 和 `bitexact_prefix_qkv.py` 在同一个进程里跑完两个臂,自己打印两个 digest;
-其余的每个臂一个进程,共用 cache 目录就是为了这个。两种情况下,两个 digest 都必须相同。
+其余 gate 需要一个臂一个进程,或者固定的 stage 顺序。
+**准确的调用方式在 [`tools/README.md`](tools/README.md) 里** -- 照着跑;
+当成一行命令跑,它们只会打出一个和谁都不比的 digest,然后正常退出。
 
-大部分优化带 `RLINF_*=0` kill switch,gate 的 OFF 臂走的就是那条降级路径。有四项没有:
-adaRMS 预计算、动作专家内部融合的 QKV、静态 prefix-KV 缓冲、以及在 GPU 上构造的
-attention mask,这四项是结构性的,没有环境变量。它们只能靠
-`tools/bitexact_compiled_toggles.py --disable` 在活的模型上 monkey-patch 掉 --
-`run_bitexact_backfill.sh` 驱动的就是这件事。
-
-WARNING: **这里的位一致性是按编译路径分层的,并没有被无条件声明。** 有些项在 eager 下逐位相同,
-在实际发布用的 `max-autotune` 下并不 -- 而 `max-autotune` 自己的 kernel 选择在冷 autotune
-之间就不稳定:在某个 shape 上,4 次冷缓存里有 1 次选了 cuBLAS 而不是 Triton 模板,
-两者 digest 不同。**对每一项都无条件成立的说法是:变换是代数等价的。**
-细节见 `pi05_infer/patches/inductor_mm_tiles.py` 里的 bit-exactness 说明 --
-那里记录了一条本项目**曾经相信、已经发布、后来被实测推翻**的规则。
+> 位一致性是按编译路径分层的,并没有被无条件声明:有些项在 eager 下逐位相同,
+> 在实际发布用的 `max-autotune` 下并不 -- 而它自己的 kernel 选择在冷 autotune
+> 之间就不稳定。对每一项都无条件成立的说法是:变换是代数等价的。
+> `pi05_infer/patches/inductor_mm_tiles.py` 里那条说明记录了一条本项目
+> **曾经相信、已经发布、后来被实测推翻**的规则。
 
 ## 仓库结构
 
 ```
 pi05_infer/    引擎本体
   gemma/       vendoring 并改过的动作专家 Gemma + Triton 融合核
-  patches/     打在"我们不拥有的代码"上的优化(stock transformers 的 prefix、
-               inductor 的 tile 候选)-- 全部可关
-bench/         standalone_infer_bench.py -- 延迟基准
-tools/         验证 gate 与测量驱动 -- 见 tools/README.md
-docs/          上面那些图,以及重新生成它们的 make_charts.py
-_extract_src/  抽取前的 RLinf 原始文件
+  patches/     打在"我们不拥有的代码"上的优化 -- 全部可关
+bench/         延迟基准
+tools/         验证 gate 与测量驱动
+docs/          那两张图,以及重新生成它们的 make_charts.py
+  kernels/     去噪步的逐核快照,一次测量一个文件
+_extract_src/  抽取前的 RLinf 原始文件,留着是为了整个抽取可以用 diff 审计
 ```
 
-`import pi05_infer` 只让**动作专家**走我们 vendoring 的 Gemma,PaliGemma 的 **prefix** 仍用
-原厂 transformers。这条缝是刻意留的:它是"去噪核的改动够不着 968 token 的 prefix"这件事的保证。
-
-**`_extract_src/` 不是包的一部分** -- 没有任何代码 import 它,它被排除在构建和 lint 之外。
-它是 `pi05_infer/` 抽取时所依据的、未经修改的 RLinf 源码,留在树里是为了让整个抽取
-**可以用 diff 审计,而不必信我们一句话**。它没有被重构,也不打算被重构;
-逐文件的改动说明见 `EXTRACTION_NOTES.md`。
+`import pi05_infer` 只让**动作专家**走 vendoring 的 Gemma,PaliGemma 的 **prefix**
+仍用原厂 transformers。这条缝就是"去噪核的改动够不着 968 token 的 prefix"的保证。
 
 ## 延伸阅读
 
-> **详细的优化记录尚未发布。** 逐项推导、正确性论证、测量方法学与原始 A/B 存档
-> 暂存内部,等这部分工作收敛后再一并发布。源码里凡是按名字引用这些文档的地方,
-> 那个名字是**出处标注,不是链接**。
+详细的优化记录尚未发布。源码里凡是按名字引用那些文档的地方,那个名字是出处标注,不是链接。
 
-* **[`EXTRACTION_NOTES.md`](EXTRACTION_NOTES.md)** -- 从 RLinf 抽取的边界与遗留项。
-* **[`tools/README.md`](tools/README.md)** -- 哪些脚本是可移植的,哪些不是。
+* [`EXTRACTION_NOTES.md`](EXTRACTION_NOTES.md) -- 从 RLinf 抽取的边界与遗留项。
+* [`tools/README.md`](tools/README.md) -- 哪些脚本可移植,哪些不可。
 
-## 许可证与来源
+## 许可证
 
 Apache-2.0([`LICENSE`](LICENSE))。本仓库 vendored 了 HuggingFace Transformers、
 [openpi](https://github.com/Physical-Intelligence/openpi)(经
 [RLinf/openpi](https://github.com/RLinf/openpi) fork)与
-[RLinf](https://github.com/RLinf/RLinf) 的代码,逐文件的修改清单见 [`NOTICE`](NOTICE)。
-
-台账图上那两条虚线是 `dexmal/realtime-vla` 和 `limxdynamics/FluxVLA`。两者与我们的配置
-都不是双向对齐的,也都没有复用其代码 -- 每个数字是什么、不是什么,记在
-`docs/make_charts.py` 里。
+[RLinf](https://github.com/RLinf/RLinf) 的代码,逐文件来源见 [`NOTICE`](NOTICE)。
