@@ -10,10 +10,11 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/ledger_dark.png">
-  <img alt="配对 A/B 测出的加速,按三类拆开:CPU 开销、去噪步冗余削减、kernel 融合与调优" src="docs/ledger_light.png">
+  <img alt="配对 A/B:40.50 ms,相对关掉优化快 6.45 ms,分三类:CPU 开销 -0.80、去噪步冗余削减 -1.63、kernel 融合与调优 -3.03" src="docs/ledger_light.png">
 </picture>
 
 当前 `main`:**40.50 ms**,不锁频 plain wall clock,n=30,p50。
+相对同一构建关掉可开关的优化,**快 6.45 ms**。
 
 <details>
 <summary>一个去噪步花在哪里</summary>

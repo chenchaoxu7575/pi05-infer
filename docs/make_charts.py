@@ -147,103 +147,93 @@ def _rounded_hbar(ax, y, x0, x1, height, color, radius_pt=4.0, zorder=3):
 
 
 # --------------------------------------------------------------------------
-# Chart 1 - what the shipped optimizations are worth, measured in one session
+# Chart 1 - what the shipped optimizations are worth
 # --------------------------------------------------------------------------
-# Paired A/B, 2026-08-03, commit 6d78b8a, RTX PRO 5000, torch 2.7.1+cu128.
-# Six alternating rounds (off,on / on,off), one shared inductor cache, GPU lock
-# held per round, clocks UNLOCKED and sampled (arms matched within 0.15%).
+# 2026-08-03, commit 6d78b8a, RTX PRO 5000, torch 2.7.1+cu128, clocks UNLOCKED
+# and sampled. Alternating paired rounds, one shared inductor cache, GPU lock held
+# per round. Null control +0.07 +/- 0.12 ms over 9 rounds.
 #
-# arm off = current main with its eight switchable optimizations disabled
-# arm on  = shipping defaults, --stage1
-#
-# Arm `off` is bimodal across processes: its per-run p50s split into two clusters
-# 1.5 ms apart with only +/-0.2 ms inside a run. Cause unidentified; it is not
-# clock, position, ordering or autotune. Alternation sampled 3 of each, so it does
-# not bias the delta, but it is why a single `off` p50 is not quotable and only
-# the paired delta is.
-ON_MS = 40.50  # median of 6 run medians; runs span 40.36 .. 40.58
-OFF_LO, OFF_HI = 46.23, 47.86
-DELTA, DELTA_SD = 6.45, 0.75
-NULL, NULL_SD = -0.29, 0.94
+# TOTAL: all eight switchable optimizations off at once, vs shipping defaults.
+# CATEGORIES: leave-one-out from shipping defaults, so they are what you lose by
+# turning that group off. They do not sum to the total -- interactions, and four
+# more optimizations are structural and on in both arms of every round.
+ON_MS = 40.50
+TOTAL, TOTAL_SD = 6.45, 0.75
+NULL, NULL_SD = 0.07, 0.12
 
-# Three categories, ordered top-down by the layer they act on: host side, then
-# the algorithm, then the kernels. Every item listed is switchable and therefore
-# inside the measured delta -- except the four marked (structural), which have no
-# kill switch and are on in both arms.
-BLOCKS = [
-    ("CPU overhead", [
-        "capture one flow_ode step as a graph, replay it for every step",
-        "hoist the step-invariant mask / position ids / rotary table out of the loop",
-        "attention mask built on device, not copied from the host (structural)",
-        "prefix KV into a static buffer instead of a re-cat per step (structural)",
-    ]),
-    ("denoise-step work removed", [
-        "precompute the adaRMS modulation table, 37 projections -> 1 gather (structural)",
-        "drop the timestep conditioning nothing reads",
-        "drop the prefix LM's last-layer tail -- only its KV is consumed",
-    ]),
-    ("kernel fusion & optimization", [
-        "GeGLU and RoPE fused into the GEMM epilogue (two Triton kernels)",
-        "Q/K/V into a single GEMM, in the expert (structural) and the prefix",
-        "retuned down_proj / o_proj tiles; pinned the Q*K^T tile",
-    ]),
+CATS = [
+    (
+        "CPU overhead",
+        0.80,
+        0.43,
+        12,
+        [
+            "capture one flow_ode step as a graph, replay it for every step",
+            "hoist the step-invariant mask / position ids / rotary table out of the loop",
+            "attention mask built on device (structural)",
+            "prefix KV into a static buffer (structural)",
+        ],
+    ),
+    (
+        "denoise-step work removed",
+        1.63,
+        0.14,
+        4,
+        [
+            "precompute the adaRMS modulation table, 37 projections -> 1 gather (structural)",
+            "drop the timestep conditioning nothing reads",
+            "drop the prefix LM's last-layer tail -- only its KV is consumed",
+        ],
+    ),
+    (
+        "kernel fusion & optimization",
+        3.03,
+        0.11,
+        4,
+        [
+            "GeGLU and RoPE fused into the GEMM epilogue (two Triton kernels)",
+            "Q/K/V into a single GEMM, expert (structural) and prefix",
+            "retuned down_proj / o_proj tiles; pinned the Q*K^T tile",
+        ],
+    ),
 ]
 
 FOOTNOTE = (
-    "a floor, not the total: four more optimizations are structural, have no kill "
-    "switch, and are on in both arms"
+    "categories are leave-one-out and do not sum to the total; four more "
+    "optimizations are structural and on in both arms"
 )
 
 
 def chart_ledger(mode: str) -> None:
-    """Two bars, the paired delta, and what is in the fast arm."""
     t = THEMES[mode]
     _style(t)
+    colors = [t["s1"], t["s2"], t["s3"]]
 
-    fig = plt.figure(figsize=(10.5, 5.2), dpi=200)
-    ax = fig.add_axes((0.235, 0.640, 0.700, 0.165))
-    ax.set_xlim(0, OFF_HI * 1.13)
-    ax.set_ylim(-0.6, 1.6)
+    fig = plt.figure(figsize=(10.5, 6.0), dpi=200)
+    ax = fig.add_axes((0.325, 0.660, 0.560, 0.200))
+    ax.set_xlim(0, 3.6)
+    ax.set_ylim(-0.65, 2.65)
     ax.axis("off")
 
-    off_mid = (OFF_LO + OFF_HI) / 2
-    _rounded_hbar(ax, 1, 0, off_mid, 0.62, t["muted"], radius_pt=3.0)
-    ax.plot([OFF_LO, OFF_HI], [1, 1], color=t["ink"], lw=1.4, zorder=6)
-    for xv in (OFF_LO, OFF_HI):
-        ax.plot([xv, xv], [0.86, 1.14], color=t["ink"], lw=1.4, zorder=6)
-    ax.text(
-        OFF_HI * 1.02,
-        1,
-        f"{OFF_LO:.1f} - {OFF_HI:.1f} ms",
-        ha="left",
-        va="center",
-        fontsize=10,
-        color=t["ink2"],
-    )
-
-    _rounded_hbar(ax, 0, 0, ON_MS, 0.62, t["s1"], radius_pt=3.0)
-    ax.text(
-        ON_MS * 1.02,
-        0,
-        f"{ON_MS:.2f} ms",
-        ha="left",
-        va="center",
-        fontsize=10.5,
-        fontweight="bold",
-        color=t["ink"],
-    )
-
-    # axes box is (0.235, 0.640, w, 0.165) with ylim (-0.6, 1.6): convert the two
-    # bar rows into figure coordinates so the labels cannot be clipped by the axes
-    for yv, lab, bold in ((1, "optimizations off", False), (0, "current main", True)):
-        fy = 0.640 + 0.165 * (yv + 0.6) / 2.2
-        fig.text(0.215, fy, lab, ha="right", va="center", fontsize=10.5,
-                 color=t["ink"] if bold else t["ink2"],
-                 fontweight="bold" if bold else "normal")
+    for i, ((label, ms, sd, n, _items), c) in enumerate(zip(CATS, colors)):
+        y = 2 - i
+        _rounded_hbar(ax, y, 0, ms, 0.60, c, radius_pt=3.0)
+        ax.text(
+            ms + 0.06,
+            y,
+            f"-{ms:.2f} ms",
+            ha="left",
+            va="center",
+            fontsize=11,
+            fontweight="bold",
+            color=t["ink"],
+        )
+        fy = 0.660 + 0.200 * (y + 0.65) / 3.30
+        fig.text(0.310, fy, label, ha="right", va="center", fontsize=10.5, color=t["ink"])
 
     fig.suptitle(
-        f"pi0.5 action expert, bs=1:   -{DELTA:.2f} ms   "
-        f"(-{100 * DELTA / (ON_MS + DELTA):.1f}%)",
+        f"pi0.5 action expert, bs=1:   {ON_MS:.2f} ms,   -{TOTAL:.2f} ms "
+        f"vs optimizations off",
         x=0.035,
         y=0.950,
         ha="left",
@@ -254,20 +244,20 @@ def chart_ledger(mode: str) -> None:
     fig.text(
         0.035,
         0.888,
-        f"paired A/B in one session, 6 alternating rounds, unlocked plain wall "
-        f"clock.  sd {DELTA_SD:.2f} ms;  null control {NULL:+.2f} +/- {NULL_SD:.2f} ms.",
+        f"paired A/B, one session, unlocked plain wall clock.  "
+        f"total sd {TOTAL_SD:.2f};  null control +{NULL:.2f} +/- {NULL_SD:.2f} ms.",
         ha="left",
         fontsize=9.5,
         color=t["ink2"],
     )
 
-    y = 0.545
-    for (label, items), c in zip(BLOCKS, (t["s1"], t["s2"], t["s3"])):
+    y = 0.575
+    for (label, ms, sd, n, items), c in zip(CATS, colors):
         fig.patches.append(
             plt.Rectangle(
                 (0.035, y - 0.004),
                 0.012,
-                0.028,
+                0.026,
                 transform=fig.transFigure,
                 facecolor=c,
                 edgecolor="none",
@@ -277,22 +267,22 @@ def chart_ledger(mode: str) -> None:
         fig.text(
             0.057,
             y,
-            label,
+            f"{label}   -{ms:.2f} +/- {sd:.2f} ms, n={n}",
             ha="left",
             va="bottom",
-            fontsize=11.5,
+            fontsize=10.5,
             fontweight="bold",
             color=t["ink"],
         )
-        y -= 0.055
+        y -= 0.042
         for it in items:
-            fig.text(0.057, y, it, ha="left", va="bottom", fontsize=9.5, color=t["ink2"])
-            y -= 0.044
-        y -= 0.020
+            fig.text(0.057, y, it, ha="left", va="bottom", fontsize=9, color=t["ink2"])
+            y -= 0.033
+        y -= 0.013
 
     fig.text(
         0.035,
-        0.030,
+        0.028,
         FOOTNOTE,
         ha="left",
         va="bottom",
