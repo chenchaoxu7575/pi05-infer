@@ -42,8 +42,11 @@ Three panels, **three different rulers**: the prehistory before this repository 
 measurement protocol), this repository's paired end-to-end ledger, and the same optimizations
 counted as GPU busy per denoising step.
 
-The two dashed lines mark where reference implementations sit -- neither is a paired
-measurement and no win/loss is claimed.
+The two dashed lines mark where reference implementations sit. A dashed line crossing a
+waterfall is not a paired comparison -- the ledger rows were taken over weeks, each
+against its own baseline -- so no win or loss should be read off these charts. The
+comments in `docs/make_charts.py` record where each peer number came from and what is
+and is not matched.
 
 <details>
 <summary>Where a denoise step goes, and why the prefix is the ceiling</summary>
