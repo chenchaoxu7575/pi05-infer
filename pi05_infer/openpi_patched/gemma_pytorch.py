@@ -1,10 +1,7 @@
-# `from __future__ import annotations` and the dropped `import pytest` are the only
-# deviations from upstream in this header. Upstream annotates `past_key_values` as
-# `pytest.Cache` (below) -- almost certainly a bad auto-import of `Cache`. Evaluating
-# that annotation made pytest a *runtime* dependency of the inference path. Deferring
-# annotation evaluation keeps the line byte-identical while making the import go away.
-# (The installed openpi's own copy of this file still does it, so the environment keeps
-# the dependency either way -- this only stops *us* from adding one.)
+# Deviation from upstream: deferred annotations, and no `import pytest`. Upstream
+# annotates `past_key_values` as `pytest.Cache` below -- a bad auto-import of `Cache`
+# -- which made pytest a runtime dependency. Deferring evaluation keeps that line
+# byte-identical to upstream while dropping the import.
 from __future__ import annotations
 
 from typing import Literal

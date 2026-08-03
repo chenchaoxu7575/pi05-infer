@@ -1,172 +1,53 @@
 """Extra small-M tile candidates for inductor's Triton ``mm``/``bmm`` templates.
 
-The denoise loop runs every expert GEMM at ``M = action_chunk`` (50 for the
-turtle config), so the two weight-streaming GEMMs of each layer --
-``down_proj`` (50x4096 @ 4096x1024) and ``o_proj`` (50x2048 @ 2048x1024) --
-are pure bandwidth problems whose only parallelism is the tile grid.
+The denoise loop runs every expert GEMM at ``M = action_chunk`` (50), so the two
+weight-streaming projections of each layer -- ``down_proj`` (50x4096 @ 4096x1024)
+and ``o_proj`` (50x2048 @ 2048x1024) -- are bandwidth problems whose only
+parallelism is the tile grid.  Inductor's stock list has no ``BLOCK_M < 32``
+entry and clamps ``BLOCK_M`` up to 64, which makes M a single tile: the grid is
+``N / BLOCK_N = 32`` CTAs on a 110-SM card.  This module appends deeper-pipelined
+small-``BLOCK_M`` candidates **for those two shapes only** and lets inductor's
+autotuner pick.  The two attention BMMs are patched separately
+(``install_small_m_bmm_configs``) because ``torch._inductor.kernel.bmm`` binds
+``mm_configs`` by value at import time::
 
-Inductor's stock ``mm_kernel_configs`` list has no ``BLOCK_M = 16`` entry, and
-``filtered_configs`` clamps every ``BLOCK_M`` down to ``next_power_of_2(50) =
-64`` but never up from below.  The champion it lands on for both shapes is
-``BLOCK_M=64, BLOCK_N=32, BLOCK_K=128, num_stages=5, num_warps=4``.  With
-``BLOCK_M=64`` and ``M=50`` the M dimension is a single tile, so the whole grid
-is ``N / BLOCK_N = 32`` CTAs on a 110-SM card: the GEMM runs at roughly half
-the bandwidth the same weight stream reaches elsewhere in the same layer.
+    P.V    bmm(8x50x1018, 8x1018x256)   -- extra candidates
+    Q.K^T  bmm(8x50x256 , 8x256x1018)   -- pinned, see below
 
-The only ``BLOCK_M=32``/``BLOCK_K=128`` candidate the stock list does contain
-carries ``num_stages=2``, which loses on pipeline depth rather than on CTA
-count -- which is why the search never finds the good corner on its own.
+**Bit-exactness: measured, not derived.**  Safety is a property of the
+``(shape, BLOCK_K, num_stages)`` combination and does not follow from any single
+parameter.  Both plausible rules are false here: at K=4096 ``BLOCK_K`` is inert
+while ``num_stages`` flips ``down_proj``'s output bits; at K=256 both are inert.
+Every shipped entry is digest-verified equal to the unpatched build's output.
+**Do not add a candidate on a parameter argument** -- re-run
+``tools/bitexact_denoise_gemms.py`` / ``tools/bitexact_denoise_bmms.py``.
 
-This module appends a handful of deep-pipelined small-``BLOCK_M`` candidates
-**for those two shapes only** and lets inductor's own autotuner benchmark them
-against the stock list.  The first round of this took ``BLOCK_M`` from 64 to 16
-or 32 -- 64 CTAs instead of 32.  MEASURED in the model on RTX PRO 5000 Blackwell
-(sm_120, 110 SM), nsys 2026.1.2, 12 predicts::
+**Pinning ``Q.K^T``.**  Inductor cannot separate the top of this shape's field:
+its nine best choices land within 0.0056-0.0062 ms and carry ``BLOCK_K`` 32, 64
+and 128, so the winner -- and with it the fp32 reduction split -- moves from
+process to process on a cold cache.  ``_DEFAULT_BMM_PINS`` replaces the candidate
+list with the measured winner rather than appending to it.  The point is the
+variance, not the mean: it takes the draw-to-draw spread to zero.
 
-    down_proj  15.06 -> 11.71 us/call  (-22.2%, 591 -> 760 GB/s)
-    o_proj      8.47 ->  6.94 us/call  (-18.1%, 530 -> 647 GB/s)
-    denoise stream busy  11.48 -> 10.55 ms/predict; kernel counts unchanged
-    e2e paired A/B, SM clock held equal: -0.88 ms/predict
+⚠️  **Verified on sm_120 only, and "bit-identical" is card-relative** -- it means
+identical to what an unpatched build produces *on this card*, and an unpatched
+build picks a different kernel elsewhere, so the reference itself moves.  The pin
+declines to install off sm_120; the digest set only warns, because the env hooks
+exist to explore.
 
-A second round then widened ``BLOCK_K`` to 256, which the first round could not
-reach because a module-level ``assert BLOCK_K == 128`` excluded the whole family
-from the search -- see the bit-exactness note.  The champion today is
-``(BLOCK_M, BLOCK_N, BLOCK_K, stages, warps) = (32, 32, 256, 4, 4)`` for both
-shapes; per-call figures are with ``_DEFAULT_CFGS`` below.  **The two rounds have
-separate baselines and do not chain.**
-
-**Bit-exactness.**  An earlier version of this module claimed that ``BLOCK_K``
-is the only tile parameter that changes the fp32 accumulation order and that
-``BLOCK_M``/``BLOCK_N``/``num_warps``/``num_stages`` are numerically inert.
-**Measurement refuted that, and in the dangerous direction** (2026-07-31, real
-checkpoint weights, 18 layers x 2 ops, 3 seeds, 5.53 M bf16 elements)::
-
-    down_proj (N=1024, K=4096), reference digest 2a25a0b5... :
-        BLOCK_K 128 -> 256 (and -> 64, -> 512)   bit-identical
-        num_stages 5 -> 4 at BLOCK_K=128         DIFFERS: 18/36 outputs,
-                                                 359732/921600 elements,
-                                                 max|d| 6.25e-2
-        num_stages 5 -> 3 at BLOCK_K=128         same difference
-        num_stages 4 or 3 at BLOCK_K=256         bit-identical
-    (BLOCK_M/BLOCK_N are inert: (32,32,128,4,4) and (16,64,128,4,4) produce
-     byte-identical output -- they differ only in stages from the reference.)
-
-So the safe set is **not** derivable from any single parameter: it is a property
-of the (shape, BLOCK_K, num_stages) combination and has to be measured.  The
-list below therefore carries **only entries whose output digest was verified
-equal to the shipping reference** for both shapes; the old
-``assert BLOCK_K == 128`` gate was blocking the safe direction while waving the
-unsafe one through.  ``o_proj`` (N=1024, K=2048) did not flip on any config
-tested, so the constraint above is driven entirely by ``down_proj``.
-
-⚠️  **"Bit-exact relative to what."**  Unpatched stock inductor is *itself* not
-stable across fresh autotunes on ``mm(50x4096, 4096x1024)``: cuBLAS ``mm``
-(0.0202 ms) and the Triton template (0.0204 ms) tie, and 1 of 4 cold caches
-picked cuBLAS -- which has its own digest.  The reference this module preserves
-is the Triton champion the shipped patch already selects.
-
-**Scope.**  The patch replaces a name in ``torch._inductor.kernel.mm``, so it is
-process-global: any *other* model compiled in the same process whose GEMM also
+**Scope.**  These patches replace names in ``torch._inductor.kernel.{mm,bmm}``,
+so they are process-global: another model compiled in the same process whose GEMM
 hits ``m <= 64`` with one of the listed ``(N, K)`` pairs gets the wider search
-too.  That stays algebraically exact, but its kernel choice -- and therefore its
-output bits relative to an unpatched run -- can move, and the digests below were
-taken on *these* shapes with *these* weights, so they say nothing about another
-model's.  There is no cheap version of this check: it is the whole reason the
-list is short.  Narrow ``RLINF_SMALL_M_MM_SHAPES`` or set ``RLINF_SMALL_M_MM=0`` if
-that matters.
+too, and its output bits relative to an unpatched run can move.  Narrow the
+``*_SHAPES`` env var or turn the patch off if that matters.
 
-Kill switch: ``RLINF_SMALL_M_MM=0`` restores stock inductor behaviour.
-Tuning: ``RLINF_SMALL_M_MM_CFGS="BM,BN,BK,stages,warps;..."`` and
-``RLINF_SMALL_M_MM_SHAPES="N x K;..."``, ``RLINF_SMALL_M_MM_MAX_M``.
+Kill switches: ``RLINF_SMALL_M_MM=0``, ``RLINF_SMALL_M_BMM=0``,
+``RLINF_SMALL_M_BMM_PIN=0`` (keep the appended candidates, un-pin).
+Tuning: ``RLINF_SMALL_M_{MM,BMM}_{CFGS,SHAPES,MAX_M}``,
+``RLINF_SMALL_M_BMM_PINS``; formats are in the parser docstrings below.
 
---------------------------------------------------------------------------
-The attention BMMs (``install_small_m_bmm_configs``, ``RLINF_SMALL_M_BMM``)
---------------------------------------------------------------------------
-
-``torch._inductor.kernel.bmm`` binds ``mm_configs`` at import time
-(``from .mm_common import mm_configs``), so replacing
-``torch._inductor.kernel.mm.mm_configs`` above never reached the two batched
-attention GEMMs of the denoise loop.  They are patched separately here:
-
-    P.V    ``bmm(8x50x1018, 8x1018x256)``  -> ``triton_tem_fused_bmm_7``
-    Q.K^T  ``bmm(8x50x256 , 8x256x1018)``  -> ``triton_tem_fused_bmm_5``
-
-(8 query heads, ``action_chunk`` 50 rows, 968 prefix + 50 suffix = 1018 KV,
-head_dim 256; the single KV head is broadcast, so the second operand's batch
-stride is 0 and each byte of K/V is read once from DRAM.)
-
-Only ``P.V`` gets extra candidates, and the winning candidate is *not* the one
-the occupancy analysis predicted.  Measured in isolation on the real shapes,
-SM clock locked at 2092 MHz, kernel time from the CUDA profiler over 50 graph
-replays of an isolated probe on the two real bmm shapes::
-
-    P.V   stock champion  BM64 BN32 BK128 s5 w4   64 CTA   7.79 us
-          appended        BM32 BN64 BK128 s4 w4   64 CTA   5.97 us  (-23.3%)
-          BM16 (256 CTA)  BM16 BN32/64 BK128      256 CTA  8.0-8.3 us  (WORSE)
-
-The grid is 64 CTAs either way -- ``ceil(50/64)*ceil(256/32) = 8`` versus
-``ceil(50/32)*ceil(256/64) = 8``, times 8 batch.  Quadrupling the CTA count
-with ``BLOCK_M=16``, which is what the ncu occupancy profile pointed at (46 of
-110 SMs never execute a cycle), makes this kernel 30% *slower*.  The win comes
-from the tile aspect ratio and one less pipeline buffer (96 KB -> 72 KB of
-shared memory), not from filling the machine.  Inductor's own autotune in the
-model agrees: 0.0102 ms for the stock champion, 0.0082 ms for this entry.
-
-``Q.K^T`` gets **nothing**: it was swept over 28 configs and the best one found
-(``BM64 BN128 BK32 s4 w4``, 4.42 us) beats the stock champion (4.49 us) by 1.6%,
-which is below the noise floor of inductor's own autotune benchmarking.  That
-benchmarking cannot separate the top of this shape's field at all -- in a
-production compile its nine best choices all land within 0.0056-0.0062 ms, and
-they carry ``BLOCK_K`` 32, 64 *and* 128.  Which one wins therefore moves from
-process to process on a cold cache, and with it the fp32 reduction split: this
-shape is not bit-stable across fresh autotunes even with no patch at all.  That
-is a pre-existing hazard (mitigated in practice by ``PersistentCache`` pinning
-the winner per cache dir), and a reason not to add candidates here.
-
-**Pinning ``Q.K^T``.**  The paragraph above says not to *add* candidates to this
-shape.  The reason it gives -- the winner moves from process to process on a
-cold cache -- is also a reason to *remove* them.  MEASURED over 29 cold compiles
-of unchanged source: autotune drew **5 different tiles** for this one shape, and
-in-model the fastest and slowest of the five differ by **20.2%**.  Its own
-selection margin has a **median of 0.00%** while its reproduction noise on the
-same candidate is **6-24%** -- at that ratio it is not choosing, it is sampling.
-
-``_DEFAULT_BMM_PINS`` therefore replaces the candidate list for this shape with
-the single measured winner instead of appending to it.  Worth -0.106 ms/predict
-in expectation, and it takes the draw-to-draw sd of 6.41 us/step to exactly
-zero, which is what makes any later A/B on this shape readable at all.
-
-**Bit-exactness for the BMMs.**  The old rule -- ``BLOCK_K`` decides the fp32
-reduction order, everything else is inert -- was **refuted once on each of the
-two shapes it was applied to, and in opposite directions**:
-
-    down_proj, K=4096   BLOCK_K inert; num_stages FLIPS BITS at BLOCK_K=128
-    Q.K^T,     K=256    BLOCK_K inert AND num_stages inert -- all 7 tiles swept
-                        (18 layers x 7.33 M bf16 elements) are torch.equal
-
-One shape says the rule is too weak, the other says it is too strong.  There is
-no reformulation that covers both, because the answer depends on how the K loop
-is actually split for that K -- **it can only be measured**.  So the per-shape
-``BLOCK_K`` in ``_DEFAULT_BMM_SHAPES`` is now informational, the assert that
-enforced it is gone, and both the appended candidates and the pin above carry
-digests taken with ``tools/bitexact_denoise_bmms.py``.  A cuBLAS arm run as a
-positive control *does* come out different, so that gate has resolving power.
-
-⚠️  **``_VERIFIED_CFGS`` and the pin are verified per card, and "verified" stops
-meaning anything on a different one.**  Both were measured on sm_120; the
-reference they were compared against is that card's own stock champion, so on
-another card the *reference itself* moves and the equality claim has no subject.
-The pin declines to install off sm_120 for that reason (and because the tile
-that wins there is a different question).  The digest set does not -- it only
-warns -- because the env hook exists to explore.
-
-Kill switch: ``RLINF_SMALL_M_BMM=0`` (whole patch),
-``RLINF_SMALL_M_BMM_PIN=0`` (keep the appended candidates, restore autotune's
-choice on the pinned shapes).
-Tuning: ``RLINF_SMALL_M_BMM_SHAPES="NxK@BK;..."``,
-``RLINF_SMALL_M_BMM_CFGS="NxK:BM,BN,BK,stages,warps|...;..."``,
-``RLINF_SMALL_M_BMM_PINS="NxK:BM,BN,BK,stages,warps;..."``,
-``RLINF_SMALL_M_BMM_MAX_M``.
+Per-tile measurements, the sweeps behind each choice and the digest runs are in
+the (unpublished) internal record; the numbers they support are in README.md.
 """
 
 import itertools
@@ -182,28 +63,10 @@ __all__ = [
     "small_m_bmm_pin_enabled",
 ]
 
-# (BLOCK_M, BLOCK_N, BLOCK_K, num_stages, num_warps).
-#
-# EVERY entry here is digest-verified equal to the shipping reference for BOTH
-# shapes -- see the bit-exactness note above.  Do not add a candidate without
-# re-running that check; "it only changes BLOCK_M/BLOCK_N/warps" is not a proof.
-#
-# (32,32,256,4,4) is the measured champion for both shapes (2026-07-31, in-model
-# nsys at 1897 MHz): down_proj 14.794 -> 12.375 us/call (-16.4%), o_proj
-# 9.414 -> 7.797 (-17.2%); denoise stream -0.654 ms/predict, e2e paired A/B
-# -0.52 +/- 0.28 ms (4/4 same sign).
-#
-# Three entries were REMOVED on 2026-07-31 because they flip down_proj's output
-# bits -- (16,64,128,4,4), (16,64,128,3,4), (16,32,128,4,2), all num_stages<5 at
-# BLOCK_K=128.  They shipped for weeks and stayed bit-exact only because
-# autotune happened to keep picking num_stages=5; (16,64,128,4,4) is ~1% faster
-# than that champion, so a different autotune draw would have been both faster
-# and silently non-reproducible.
-#
-# Deliberately NOT extended with the BLOCK_N=32 / num_warps=4 corner: filtered_
-# configs clamps num_warps to BLOCK_M*BLOCK_N//256 (= 2 for a 16x32 tile), and
-# forcing 4 warps past that clamp changes nothing (14.479 us either way).  The
-# 128-CTA corner is reachable today and is simply slower.
+# (BLOCK_M, BLOCK_N, BLOCK_K, num_stages, num_warps), all digest-verified.
+# num_stages < 5 at BLOCK_K=128 flips down_proj's bits and must stay out.
+# The BLOCK_N=32 / num_warps=4 corner is deliberately absent: filtered_configs
+# clamps num_warps to BLOCK_M*BLOCK_N//256, and that corner is slower anyway.
 _DEFAULT_CFGS = (
     (32, 32, 256, 4, 4),  # champion, both shapes
     (32, 32, 256, 3, 4),
@@ -211,16 +74,13 @@ _DEFAULT_CFGS = (
     (32, 32, 128, 5, 4),
 )
 
-# (N, K) of the GEMMs to widen the search for: the action expert's o_proj and
-# down_proj. Everything else -- the 968-token PaliGemma prefix, the adaRMS
-# projections, the action in/out projections -- keeps inductor's stock list, so
-# its kernel selection (and hence its output bits) cannot move.
+# (N, K) to widen the search for: the action expert's o_proj and down_proj only.
+# Everything else -- prefix, adaRMS, action in/out -- keeps the stock list, so its
+# kernel selection (and output bits) cannot move.
 _DEFAULT_SHAPES = ((1024, 2048), (1024, 4096))
 
-# Digest-verified safe for both mm shapes (see the bit-exactness note). Anything
-# outside this set supplied via RLINF_SMALL_M_MM_CFGS is allowed -- the env hook
-# exists precisely to explore -- but it warns, because safety here is measured,
-# not derivable from the tile parameters.
+# Digest-verified for both mm shapes. Anything else via RLINF_SMALL_M_MM_CFGS is
+# allowed but warns -- the hook exists to explore, and safety here is measured.
 _VERIFIED_CFGS = frozenset(
     {
         (32, 32, 256, 4, 4),
@@ -232,38 +92,18 @@ _VERIFIED_CFGS = frozenset(
 )
 
 # ---- attention bmm ----------------------------------------------------------
-# (N, K) -> BLOCK_K the *stock* champion for that shape uses. This is the shape
-# allowlist; the BLOCK_K is informational only. It used to be asserted as a
-# bit-exactness pin, on the same rule the mm side refuted -- and on these two
-# shapes the rule fails in *both* directions: at K=256, BLOCK_K and num_stages
-# are alike inert (all 7 tiles swept produce byte-identical output). See the
-# BMM bit-exactness note in the module docstring.
+# Shape allowlist. The value is the BLOCK_K the stock champion uses, kept as
+# documentation only -- it used to be asserted as a bit-exactness pin, on the
+# rule the module docstring records as false.
 _DEFAULT_BMM_SHAPES = {
     (256, 1018): 128,  # P.V    bmm(8x50x1018, 8x1018x256)
     (1018, 256): 32,  # Q.K^T  bmm(8x50x256 , 8x256x1018)
 }
 
-# (N, K) -> the single tile inductor is allowed to use for that shape.
-#
-# Unlike _DEFAULT_BMM_CFGS, which *appends* candidates and leaves the choice to
-# autotune, a pin *replaces* the candidate list: autotune has nothing left to
-# choose. That is the point -- on Q.K^T the choice itself is the problem.
-#
-# MEASURED (2026-08-01/02, RTX PRO 5000, 29 cold compiles of the same source):
-# autotune drew 5 different tiles for this one shape, and in-model the fastest
-# and slowest of them differ by 20.2%. Inductor's own selection margin has a
-# median of 0.00% while its reproduction noise on the same candidate is 6-24%,
-# so it is not choosing -- it is sampling. Pinning is worth -0.106 ms/predict in
-# expectation and, more usefully, drops the draw-to-draw sd of 6.41 us/step to
-# exactly zero, which is what makes any later A/B on this shape readable.
-#
-# Numerically free: 7 tiles x 18 layers x 7.33 M bf16 elements, all torch.equal.
-# The gate has resolving power -- a cuBLAS arm run as a positive control does
-# come out different.
-#
-# ONLY APPLIED ON sm_120. The sweep was run on one card; on any other the tile
-# that wins is a different question and autotune is the better answer, so the
-# pin declines to install rather than pinning a tile nobody measured there.
+# (N, K) -> the single tile inductor may use for that shape. Unlike
+# _DEFAULT_BMM_CFGS this *replaces* the candidate list instead of appending to
+# it: on Q.K^T the choice itself is the problem. sm_120 only -- see the module
+# docstring. Digest-verified against every tile in the sweep.
 _PIN_DEVICE_CAPABILITY = (12, 0)
 _DEFAULT_BMM_PINS = {
     (1018, 256): (64, 128, 32, 4, 4),  # Q.K^T
@@ -271,11 +111,9 @@ _DEFAULT_BMM_PINS = {
 
 # (BLOCK_M, BLOCK_N, BLOCK_K, num_stages, num_warps) per (N, K).
 _DEFAULT_BMM_CFGS = {
-    # P.V. One entry, not a family: the isolated sweep at a locked 2092 MHz put
-    # num_stages=4 at 5.97 us, 3 at 6.07 and 5 at 6.31, while inductor's own
-    # autotune timed all three at 0.0082 ms and would have picked between them
-    # by benchmark noise. Widen with RLINF_SMALL_M_BMM_CFGS if another card
-    # wants a different corner.
+    # P.V. One entry, not a family: inductor times the three num_stages
+    # variants identically and would pick between them by benchmark noise.
+    # Widen with RLINF_SMALL_M_BMM_CFGS if another card wants a different corner.
     (256, 1018): ((32, 64, 128, 4, 4),),
 }
 
@@ -388,12 +226,9 @@ def install_small_m_mm_configs() -> bool:
 def _cfg_tag(name: str, *parts) -> str:
     """A cache-key tag that changes when the *candidate set* changes.
 
-    ``_bump_cache_key_tag("small_m_mm")`` used to pass a constant, which
-    separates patch-on from patch-off but **not** one config list from another:
-    editing ``_DEFAULT_CFGS`` or setting ``RLINF_SMALL_M_MM_CFGS`` left the key
-    untouched, so inductor replayed the previously compiled winner and the new
-    candidates were never benchmarked. Any A/B over tile candidates done that
-    way is meaningless. Fold the actual inputs into the tag instead.
+    A constant tag separates patch-on from patch-off but not one config list
+    from another, so inductor replays the previously compiled winner and never
+    benchmarks the new candidates -- which silently voids any A/B over tiles.
     """
     import hashlib
 
@@ -593,11 +428,9 @@ def install_small_m_bmm_configs() -> bool:
 def _pin_device_matches() -> bool:
     """True on the one card the tile sweep behind ``_DEFAULT_BMM_PINS`` was run on.
 
-    A pin is a claim that one tile beats every other tile *on this hardware*.
-    That claim does not travel: the winner depends on SM count, L2 size and the
-    roofline knee, none of which are the same on another card. Everywhere else,
-    decline to pin and let autotune do its job -- it is a worse answer only when
-    you have measured a better one.
+    A pin claims one tile beats all others *on this hardware*, which depends on
+    SM count, L2 size and the roofline knee. Elsewhere, autotune is the better
+    answer -- it is worse only where you have measured a replacement.
     """
     try:
         import torch

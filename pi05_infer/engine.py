@@ -106,11 +106,8 @@ _arch_warned = False
 def _warn_if_arch_unverified() -> None:
     """Say once, on any other GPU, that this build has left its verified range.
 
-    Deliberately a warning and not a refusal. Every optimization here has a kill
-    switch and a fallback path, the hardware-specific ones decline to install by
-    themselves, and none of them is *known* to be wrong elsewhere -- it simply has
-    not been measured elsewhere. Blocking would be a stronger claim than the
-    evidence supports, and would make the obvious next experiment impossible.
+    A warning and not a refusal: nothing here is known to be wrong elsewhere, it
+    has only not been measured there.
     """
     global _arch_warned
     if _arch_warned:
@@ -126,14 +123,11 @@ def _warn_if_arch_unverified() -> None:
     if cap == _VERIFIED_DEVICE_CAPABILITY:
         return
     logger.warning(
-        "pi05_infer: running on %s (sm_%d%d). Every speedup and every bit-exactness "
-        "digest in this repository was measured on sm_%d%d (RTX PRO 5000 Blackwell, "
-        "110 SM, 96 MB L2), and neither claim is known to hold here: the tile choices "
-        "were tuned against that card's roofline knee and SM count, and 'bit-identical' "
-        "was defined against that card's own stock autotune winner, which is a "
-        "different kernel here. Nothing is disabled -- the hardware-specific tile pin "
-        "declines to install on its own, and RLINF_* kill switches turn off the rest. "
-        "Re-run tools/ for this card before quoting any number.",
+        "pi05_infer: running on %s (sm_%d%d), but every speedup and every "
+        "bit-exactness digest here was measured on sm_%d%d. Neither claim carries "
+        "over: the tiles were tuned to that card, and 'bit-identical' was defined "
+        "against that card's own stock autotune winner. Nothing is disabled. "
+        "Re-run tools/ here before quoting any number.",
         name,
         cap[0],
         cap[1],
@@ -337,18 +331,14 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
         for key, value in processed_obs.items():
             if isinstance(value, list):
                 processed_obs[key] = [
-                    item.to(device=device).contiguous()
-                    if torch.is_tensor(item)
-                    else item
+                    item.to(device=device).contiguous() if torch.is_tensor(item) else item
                     for item in value
                 ]
             elif torch.is_tensor(value):
                 processed_obs[key] = value.to(device=device).contiguous()
             elif isinstance(value, dict):
                 for sub_key, sub_value in value.items():
-                    processed_obs[key][sub_key] = sub_value.to(
-                        device=device
-                    ).contiguous()
+                    processed_obs[key][sub_key] = sub_value.to(device=device).contiguous()
         return processed_obs
 
     # ------------------------------------------------------------------
@@ -653,7 +643,9 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
             )  # [B, n_norm, 3072]
         return torch.stack(rows, dim=0).contiguous()  # [num_steps, B, n_norm, 3072]
 
-    def embed_suffix(self, state, noisy_actions, timestep, skip_adarms_cond: bool = False):
+    def embed_suffix(
+        self, state, noisy_actions, timestep, skip_adarms_cond: bool = False
+    ):
         """CUDA-graph-safe wrapper around the parent ``embed_suffix``.
 
         The parent builds the suffix attention-mask via ``torch.tensor(<python list>)``
@@ -1067,14 +1059,10 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
 
         _warn_if_arch_unverified()
 
-        # Widen inductor's autotune space for the M-starved denoise GEMMs: the two
-        # weight-streaming projections (down_proj / o_proj) and the P.V attention
-        # BMM, and pin the Q.K^T tile. Must run before the first compile, since that
-        # is when the templates are autotuned. Every shipped tile is digest-verified
-        # against the unpatched build *on sm_120* -- safety is a measured property of
-        # (shape, BLOCK_K, num_stages), not a derivable one, so see the bit-exactness
-        # note in inductor_mm_tiles.py before assuming it holds elsewhere.
-        # RLINF_SMALL_M_MM=0 / RLINF_SMALL_M_BMM=0 opt out independently.
+        # Widen inductor's autotune space for the M-starved denoise GEMMs and pin
+        # the Q.K^T tile. Must run before the first compile, which is when the
+        # templates are autotuned. Digest-verified on sm_120 only -- see
+        # inductor_mm_tiles.py. RLINF_SMALL_M_MM=0 / RLINF_SMALL_M_BMM=0 opt out.
         from pi05_infer.inductor_mm_tiles import (
             install_small_m_bmm_configs,
             install_small_m_mm_configs,

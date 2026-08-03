@@ -326,12 +326,10 @@ FLUX_US, FLUX_KERN = 1419.0, 205
 # --------------------------------------------------------------------------
 # Provenance stamp
 # --------------------------------------------------------------------------
-# Each chart is a snapshot of a specific commit, and main has moved past all
-# three. They are deliberately NOT redrawn against current main: the ledger is a
-# paired chain measured one arm at a time, and later work was measured on
-# different baselines, so grafting today's numbers onto these bars would create
-# exactly the chained-different-rulers error the charts exist to avoid. Stamp
-# what each one is instead, and let the README carry the current absolute.
+# Each chart is a snapshot of one commit, and main has moved past all three.
+# Deliberately not redrawn: grafting today's numbers onto a paired chain measured
+# arm-by-arm is the chained-rulers error these charts exist to warn about. Stamp
+# what each one is; the README carries the current absolute.
 STAMPS = {
     "ledger": "chart state: pi05-infer @ 62aa78e\n"
               "rows measured 2026-07-11..07-28\n"
@@ -346,8 +344,7 @@ STAMPS = {
 
 
 def _stamp(fig, t: dict, which: str) -> None:
-    # Top-right, three short lines: the bottom edge of all three figures is
-    # already taken by a caveat, and one long line collides with the title.
+    # Top-right: the bottom edge is taken and one long line collides with the title.
     fig.text(0.988, 0.992, STAMPS[which], ha="right", va="top", linespacing=1.5,
              fontsize=6.6, color=t["muted"], style="italic")
 
@@ -414,13 +411,8 @@ def chart_ledger(mode: str) -> None:
     fig.suptitle("pi0.5 action expert, bs=1: 52.60 -> 42.90 ms  (-9.70 ms, -18.4%)",
                  x=0.012, y=0.988, ha="left", fontsize=14, fontweight="bold",
                  color=t["ink"])
-    # This line used to read "every ledger step bit-exact against the unoptimised
-    # path (max|delta| = 0.00e+00)". That is a stronger claim than the evidence
-    # supports and the repo's own rules forbid it: bit-identity here is tiered by
-    # compile path -- some items are bit-identical under eager but not under the
-    # shipping max-autotune, whose own kernel choice is not stable across cold
-    # autotunes. What is true of every row without qualification is that the
-    # transform is algebraically equivalent. Say that.
+    # NOT "every step is bit-exact": bit-identity here is tiered by compile path.
+    # Algebraic equivalence is what holds for every row unqualified.
     fig.text(0.012, 0.961,
              "every ledger step is an algebraically equivalent transform - no quantization, "
              "no change of sampler, no fewer denoise steps",
