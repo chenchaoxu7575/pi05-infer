@@ -82,12 +82,7 @@ python tools/bitgate.py             # 两个 Triton 融合核
 python tools/bitexact_prefix_qkv.py # prefix QKV 融合
 ```
 
-其余的每个需要 2 到 3 次调用 --
-**[`tools/README.md`](tools/README.md) 里有**;当成一行命令跑,
-它们只会打出一个和谁都不比的 digest。
-
-位一致性按编译路径分层,并未被无条件声明;边界写在
-`pi05_infer/patches/inductor_mm_tiles.py` 的说明里。
+其余的在 [`tools/README.md`](tools/README.md)。
 
 ## 仓库结构
 
@@ -102,14 +97,12 @@ docs/          那两张图,以及重新生成它们的 make_charts.py
 _extract_src/  抽取前的 RLinf 原始文件,留着让整个抽取可以用 diff 审计
 ```
 
-只有动作专家走 vendoring 的 Gemma,PaliGemma 的 prefix 仍用原厂 transformers。
-
 ## 延伸阅读
 
 * [`EXTRACTION_NOTES.md`](EXTRACTION_NOTES.md) -- 从 RLinf 抽取的边界与遗留项。
 * [`tools/README.md`](tools/README.md) -- 哪些脚本可移植,哪些不可。
 
-详细的优化记录尚未发布;源码里凡是按名字引用那些文档的地方,那个名字是出处标注,不是链接。
+详细的优化记录尚未发布。
 
 ## 许可证
 

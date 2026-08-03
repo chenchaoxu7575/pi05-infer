@@ -83,12 +83,7 @@ python tools/bitgate.py             # the two Triton fusion kernels
 python tools/bitexact_prefix_qkv.py # fused prefix QKV
 ```
 
-The rest need two or three invocations each --
-**[`tools/README.md`](tools/README.md) has them**, and run as one-liners they
-print a digest against nothing.
-
-Bit-identity is tiered by compile path and is not claimed uniformly; the note in
-`pi05_infer/patches/inductor_mm_tiles.py` has the boundary.
+The rest are in [`tools/README.md`](tools/README.md).
 
 ## Layout
 
@@ -103,16 +98,12 @@ docs/          the charts, and make_charts.py which regenerates them
 _extract_src/  the original RLinf files, so the extraction can be diffed
 ```
 
-Only the action expert runs on the vendored Gemma; the PaliGemma prefix keeps
-stock transformers.
-
 ## Further reading
 
 * [`EXTRACTION_NOTES.md`](EXTRACTION_NOTES.md) -- the extraction boundary against RLinf.
 * [`tools/README.md`](tools/README.md) -- which scripts are portable, and which are not.
 
-The detailed optimization record is not published yet; where the source cites one
-of those documents by name, the name is provenance, not a link.
+The detailed optimization record is not published yet.
 
 ## License
 
