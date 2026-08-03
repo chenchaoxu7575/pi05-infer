@@ -165,8 +165,6 @@ after warmup that the graph really was captured, failing the run if it did not. 
 exists because the failure it catches is invisible: a shape-signature mismatch degrades to
 the eager denoise loop with no symptom other than the runtime.
 
-<a id="r-verify"></a>
-
 ## Verification: numerical agreement
 
 ```bash
@@ -229,8 +227,6 @@ qualification is that the transform is algebraically equivalent. See the bit-exa
 in `pi05_infer/patches/inductor_mm_tiles.py`, which documents a rule this project believed, shipped,
 and then measured to be false.
 
-<a id="r-layout"></a>
-
 ## Repository layout
 
 ```
@@ -262,7 +258,8 @@ per-file account of what changed.
 > then. Where the source cites one of those documents by name, the name is provenance,
 > not a link.
 
-* **[`EXTRACTION_NOTES.md`](EXTRACTION_NOTES.md)** -- the extraction boundary against RLinf.
+* **[`EXTRACTION_NOTES.md`](EXTRACTION_NOTES.md)** -- the extraction boundary against
+  RLinf, and what it leaves open.
 * **[`tools/README.md`](tools/README.md)** -- which scripts are portable, and which are not.
 
 ## License and provenance
