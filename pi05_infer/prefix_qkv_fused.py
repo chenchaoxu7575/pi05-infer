@@ -13,99 +13,37 @@
 # limitations under the License.
 """One QKV GEMM per prefix-LM layer instead of three.
 
-Gemma-2B's attention projections are ``q: 2048x2048`` and, with a single KV head of
-width 256, ``k: 256x2048`` and ``v: 256x2048``.  Concatenating the three weights
-along dim 0 into one ``[2560, 2048]`` matrix is a **mathematical identity** -- every
-output column is an independent dot product over the same input row, so stacking
-them along N changes no value and no accumulation order.  Gemma has
-``attention_bias=False``, so there is no bias to concatenate.
+Gemma-2B's projections are ``q: 2048x2048`` and, with one KV head of width 256,
+``k``/``v``: ``256x2048``.  Concatenating them along dim 0 into ``[2560, 2048]``
+is a mathematical identity -- each output column is an independent dot product
+over the same input row.  ``attention_bias=False``, so there is no bias to
+concatenate.  It pays because ``N = 256`` is too narrow to amortise the A-traffic:
+k+v are 0.9 % of the LM's FLOPs but 3.3 % of its kernel time.
 
-Why it pays on the prefix (M = 968)
------------------------------------
-This is *not* the reason the same trick pays on the action expert.  There
-(``pi05_infer/gemma/modeling_gemma.py::build_qkv_fused``) M is 50, k/v emit only
-50x256, the Triton template lands on grid=8 and 8 of 110 SMs do all the work: an
-occupancy collapse.  The prefix has M = 968 and is not occupancy-starved.
+⚠️  **Layer 17 is deliberately excluded.**  Mathematical identity is not bit
+identity -- a wider N makes inductor pick a different kernel, which may split the
+K accumulation differently.  Measured: ``cat[q,k,v] -> 2560`` is bit-identical,
+but ``cat[k,v] -> 512`` (the shape the last layer would use, since
+``prefix_last_layer.py`` has already reduced it to k/v only) moves 39 % of
+elements by 1 ULP.  The denoise loop consumes that layer's KV cache, so fusing it
+would trade the bit-exactness claim for ~3 % of the win.
 
-Its problem is that ``N = 256`` is too narrow to amortise anything.  Inductor's
-champion for the ``968x256x2048`` shape is ``BLOCK_M=32, BLOCK_N=32`` (248 CTAs),
-and a 32x32 output tile needs 2048 K-steps to produce 1024 results: the kernel
-spends its time streaming B and re-reading A with almost no reuse, and lands at
-~41 TFLOP/s where the same card does ~190 TFLOP/s on the MLP GEMMs.  k+v together
-are 0.9 % of the LM's FLOPs but 3.3 % of its kernel time.  Widening N from 256 to
-2560 puts k and v inside tiles that are already paying for their A-traffic.
+**Why a monkeypatch.**  The prefix runs on the *installed* transformers, not on
+the vendored ``pi05_infer.gemma`` fork, and that boundary is what makes "a denoise
+kernel change silently reached the prefix" structurally impossible.  So this
+module edits nothing: it swaps the instance ``forward`` of each ``GemmaAttention``
+and hangs one tensor off it, leaving the module tree, parameter names and
+``state_dict`` intact so weight sync keeps working.  Two properties make that
+safe: the joint prefix+suffix training forward never calls
+``GemmaAttention.forward`` (it reaches into ``q_proj``/``k_proj``/``v_proj``
+directly), and the patched forward handles only the prefill call, delegating
+everything else to the original.
 
-MEASURED in isolation on the real shapes (bf16, ``torch.randn`` weights, SM clock
-locked at 2100 MHz, inductor ``max-autotune``, RTX PRO 5000 Blackwell)::
-
-    q(2048) + k(256) + v(256), three GEMMs   103.7 us
-    fused qkv (2560), one GEMM                60.0 us   -43.7 us / layer
-
-i.e. an upper bound of 17 x 43.7 = 743 us/predict.
-
-MEASURED in the model, nsys 2026.1.2, 12 predicts, SM clock locked at 2100 MHz::
-
-    QKV projection kernels    1791.0 -> 1069.6 us/predict   (53 -> 19 launches)
-    + the new v clone                    17.6   (see the .contiguous() note in
-                                                the patched forward)
-    + RoPE, now reading a strided slice  15.8
-    prefix stream 7          23768.5 -> 23076.5 us/predict   -692.0 us
-    denoise stream 157       11832.2 -> 11829.4 us/predict   1630 kernels, unchanged
-    e2e paired A/B, 12 rounds, clock pinned   -0.75 +- 0.23 ms  (t = -3.2, 9/12)
-
-Full write-up lives in the (unpublished) internal record; the measurements it turns
-on are reproduced above and gated by ``tools/bitexact_prefix_qkv.py``.
-The companion idea -- fusing the GeGLU into the MLP GEMM's epilogue, which pays on
-the action expert -- was measured and is a **null on the prefix**: the gate/up GEMMs
-already run at 188 TFLOP/s through cuBLAS (~92 % of this card's achievable bf16 peak
-for the shape), Triton is 6.3 % behind on them, and the pointwise it would absorb is
-2.6 % of the MLP. It is not implemented; see §2 of the write-up.
-
-Bit-exactness, and why the last layer is left alone
----------------------------------------------------
-"Mathematically identical" is not the same as "bit-identical": concatenating along
-N changes which *kernel* cuBLAS/inductor picks, and a different kernel can split
-the K accumulation differently.  It has to be measured per shape.  Measured here,
-bf16, M = 968, K = 2048::
-
-    cat[q(2048), k(256), v(256)] -> 2560   bit-identical to the three GEMMs
-    cat[k(256), v(256)]          -> 512    39 % of elements move, by 1 bf16 ULP
-
-So layer 17 -- which ``prefix_last_layer.py`` has already reduced to k/v only, and
-whose ``forward`` therefore never reaches this module's patched attention forward
--- keeps its two separate GEMMs.  Fusing it was worth 22 us of the 743 us total and
-would have cost the bit-exactness claim on the KV cache the denoise loop consumes.
-
-Why a monkeypatch and not an edit
----------------------------------
-Same reason as ``prefix_last_layer.py``: the prefix runs on the *installed*
-transformers, not on our vendored ``pi05_infer.gemma`` fork, and that boundary is
-deliberate -- it makes "a denoise-kernel change silently reached the prefix"
-structurally impossible.  So this module edits nothing.  It swaps the *instance*
-``forward`` of each ``GemmaAttention`` object and hangs one extra tensor off it.
-The module tree, the parameter names and ``state_dict`` are untouched, so RL
-weight sync keeps working.
-
-Two structural properties make the swap safe:
-
-* The joint prefix+suffix **training** forward
-  (``PaliGemmaWithExpertModel.forward``'s third branch) never calls
-  ``GemmaAttention.forward``.  It reaches into ``layer.self_attn.q_proj`` /
-  ``k_proj`` / ``v_proj`` directly and runs its own attention.  Replacing
-  ``self_attn.forward`` therefore cannot touch the training path at all.
-* The patched forward handles **only** the prefill call (``use_cache=True`` with a
-  cache object, not training).  Everything else -- decode, no-cache, the vendored
-  fork's static-KV denoise branch -- is delegated verbatim to the original
-  ``forward``.
-
-Weight sync
------------
-``_pi05_qkv_w`` is a *weight-derived* tensor: an in-place update of
-``q_proj.weight`` does not touch it, so it would silently keep serving the old
-weights.  ``refresh_fused_prefix_qkv`` re-derives it and is wired into
-``OpenPi0Inference.invalidate_weight_derived_caches``.  The refresh uses ``copy_``
-and never reallocates, so the tensor's address is stable (a captured CUDA graph
-that referenced it stays valid).
+⚠️  **``_pi05_qkv_w`` is weight-derived**: an in-place update of ``q_proj.weight``
+does not touch it, so it would keep serving stale weights after an RL weight sync.
+``refresh_fused_prefix_qkv`` re-derives it and is wired into
+``invalidate_weight_derived_caches``.  It uses ``copy_`` and never reallocates, so
+a captured CUDA graph referencing it stays valid.
 
 Kill switch: ``RLINF_FUSE_PREFIX_QKV=0``.
 """

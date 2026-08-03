@@ -13,49 +13,30 @@
 # limitations under the License.
 """Drop the dead tail of the prefix LM's *last* decoder layer.
 
-``sample_actions`` runs the PaliGemma prefix once, and throws its output embedding
-away -- only the KV cache is consumed, by the denoise loop (``engine.py``,
-``_build_prefix_cache``; the caller binds the hidden state to ``_prefix_output``
-and never reads it).  Nothing downstream of layer 17's ``k_proj`` / ``v_proj``
-therefore has a consumer:
+``sample_actions`` runs the PaliGemma prefix once and throws its output embedding
+away -- only the KV cache is consumed, by the denoise loop.  Nothing downstream of
+layer 17's ``k_proj``/``v_proj`` has a consumer::
 
     input_layernorm -> k_proj, v_proj, RoPE(k), cache.update    <- LIVE
-    q_proj, attention, o_proj, residual,
-    post_attention_layernorm, mlp, residual                     <- DEAD
+    q_proj, attention, o_proj, residual, post_attention_layernorm,
+    mlp, residual                                               <- DEAD
 
-At the checkpoint's shapes (968 prefix tokens, hidden 2048, ffn 16384, 8 q heads
-and 1 kv head of width 256) that is 226.0 of 228.1 MFLOP/token, i.e. **99.1 % of
-the last layer** and 5.5 % of the 18-layer LM.
+That is 99.1 % of the last layer, 5.5 % of the 18-layer LM.
 
-Why a monkeypatch and not an edit
----------------------------------
-The prefix deliberately runs on the *installed* transformers, not on our vendored
-``pi05_infer.gemma`` fork: the vendoring boundary is drawn at
-``PaliGemmaWithExpertModel.__init__`` precisely so that a denoise-kernel change
-cannot reach the prefix (that mistake once cost +4 ms, visible only in a
-per-stream profile).  So this module changes nothing in ``transformers`` and
-nothing in the fork; it swaps the *instance* ``forward`` of one layer object.
-The module tree, parameter names and ``state_dict`` are untouched, so RL weight
-sync is unaffected.
+**Why a monkeypatch.**  Same boundary as ``prefix_qkv_fused.py``: the prefix runs
+on the installed transformers, not the vendored fork, so this swaps one layer
+instance's ``forward`` and leaves the module tree, parameter names and
+``state_dict`` untouched.  The joint prefix+suffix training forward never calls
+``GemmaDecoderLayer.forward`` and is structurally unaffected.
 
-When it is NOT applied
-----------------------
-* ``RLINF_SKIP_LAST_LM_LAYER=0`` -- kill switch.
-* The model has a VLM value head.  In RLinf, ``openpi_action_model.py``'s
-  ``get_value_from_vlm(prefix_output)`` reads exactly this hidden state, gated by
-  ``use_vlm_value = value_after_vlm and add_value_head``.  That is **True in
-  every shipped pi0.5 PPO config** (``examples/embodiment/config/*_ppo_openpi_pi05.yaml``),
-  so the skip must stay off there.  It is False for the DSRL/SAC configs and for
-  this inference-only package, which has no value head at all.
-* Per call: whenever ``use_cache`` is off, no cache object was handed in,
-  ``output_attentions`` is requested, or RoPE tables are missing -- then the
-  original layer forward runs, unchanged.
+⚠️  **Not applied when the model has a VLM value head** -- that head reads exactly
+this hidden state.  It is present in every shipped pi0.5 PPO config, absent for
+DSRL/SAC and for this inference-only package.  **Quote the gain only with this
+condition attached.**  Also declines per call whenever ``use_cache`` is off, no
+cache was handed in, ``output_attentions`` is requested, or RoPE tables are
+missing; then the original forward runs unchanged.
 
-The joint prefix+suffix *training* forward
-(``PaliGemmaWithExpertModel.forward``'s third branch) never calls
-``GemmaDecoderLayer.forward``: it reaches into ``layer.input_layernorm`` /
-``layer.self_attn.q_proj`` / ``layer.mlp`` directly.  It is therefore structurally
-untouched by this patch, which only replaces the layer's ``forward``.
+Kill switch: ``RLINF_SKIP_LAST_LM_LAYER=0``.
 """
 
 from __future__ import annotations

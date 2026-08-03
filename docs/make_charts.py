@@ -585,7 +585,7 @@ def derive_denoise(sqlite_path: str, n_steps: float = 120.0) -> None:
     ).fetchall()
 
     def bucket(name: str) -> str:
-        # "_swiglu_mm_kernel" is the pre-2026-07-31 name of the same kernel;
+        # "_swiglu_mm_kernel" is an older name for the same kernel;
         # archived profiles still carry it.
         if name in ("_geglu_mm_kernel", "_swiglu_mm_kernel"):
             return "GeGLU: gate/up GEMM + gelu(g)*u  [fused]"

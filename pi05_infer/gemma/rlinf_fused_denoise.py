@@ -1,48 +1,38 @@
-"""Fused Triton kernels for the pi0.5 action-expert denoise loop (RLinf).
+"""Fused Triton kernels for the pi0.5 action-expert denoise loop.
 
 Two matmul-**epilogue** fusions, each behind a ``torch.library`` custom op with a
 plain-PyTorch fallback:
 
 1. ``fused_gate_up_geglu`` -- ``gelu_tanh(x @ Wg.T) * (x @ Wu.T)`` in one kernel
-   (two accumulators over one shared A tile), replacing inductor's
-   ``triton_tem_fused_mm_13`` + ``triton_tem_fused_gelu_mm_mul_14``.
+   (two accumulators over one shared A tile).
 2. ``fused_qkv_rope`` -- ``rope(x @ Wqkv.T)`` in one kernel, writing q into a
-   ``[B, M, Hq, D]`` buffer and k/v straight into the static KV cache tails,
-   replacing ``triton_tem_fused_mm_4`` + the three RoPE/store pointwise kernels.
+   ``[B, M, Hq, D]`` buffer and k/v straight into the static KV cache tails.
 
 **Bit-exactness.** Both kernels deliberately round each accumulator that the
 unfused pipeline would have *stored as bf16* back through bf16 before the
-elementwise epilogue runs (``acc.to(bf16).to(fp32)``).  That reproduces the
-rounding of the unfused two-kernel path exactly, so the fusion is bit-exact
-rather than merely algebraically equivalent -- provided the GEMM tiling matches
-inductor's (``BLOCK_K`` fixed to the value inductor's template picked, since
-``BLOCK_K`` is the only tile parameter that changes the fp32 accumulation order
-over K).  ``BLOCK_M``/``BLOCK_N`` do not affect the result of any single output
-element and are free tuning knobs.
+elementwise epilogue (``acc.to(bf16).to(fp32)``), reproducing the two-kernel
+path's rounding exactly.  This holds only while the GEMM tiling matches the one
+it was verified against.
+
+⚠️  ``BLOCK_K`` is pinned here to the value inductor's template picked, and
+``BLOCK_M``/``BLOCK_N`` are treated as free knobs.  That split is a convention,
+**not a proof**: which tile parameters perturb the fp32 reduction order depends on
+the shape and has to be measured -- see the bit-exactness note in
+``pi05_infer/inductor_mm_tiles.py``, where the same assumption was shipped and
+then refuted.  Re-run ``tools/bitgate.py`` after changing any of them.
 
 Precision is unchanged everywhere: bf16 operands, fp32 accumulate, bf16 store.
 
-Kill switches (both default to enabled; set to 0 to fall back to eager PyTorch):
-``RLINF_FUSE_GEGLU``, ``RLINF_FUSE_QKV_ROPE``.
-Tuning: ``RLINF_FUSE_GEGLU_CFG="BM,BN,BK,warps,stages"`` and
-``RLINF_FUSE_QKV_CFG="BM,BN,BK,warps,stages"``.
+**Op namespace.** The ops register as ``pi05_infer::*``, not ``rlinf::*``.
+``torch.library`` namespaces are process-global, so if a container still carries
+an older copy of this file inside ``transformers/models/gemma/`` (imported by the
+PaliGemma prefix), registering under ``rlinf::`` twice would raise and silently
+disable the fusions in whichever copy lost the race.
 
-The gate/up fusion was called *SwiGLU* until 2026-07-31; that was a misnomer.
-SwiGLU is ``silu(gate) * up``, whereas Gemma -- and therefore this kernel -- uses
-``gelu_tanh(gate) * up``, i.e. GeGLU (``hidden_act = "gelu_pytorch_tanh"``). Only
-the name changed; the arithmetic is untouched. The pre-rename environment
-variables (``RLINF_FUSE_SWIGLU``, ``RLINF_FUSE_SWIGLU_CFG``,
-``RLINF_FUSE_SWIGLU_MAX_M``) are still honoured as aliases so that archived
-repro commands keep working.
-
-**Op namespace.** The two custom ops are registered as ``pi05_infer::*``, not
-``rlinf::*``. ``torch.library`` namespaces are process-global, so as long as a
-container still carries the old copy of this file inside
-``transformers/models/gemma/`` (imported by the PaliGemma *prefix*), registering
-under ``rlinf::`` a second time would raise and silently disable the fusions in
-whichever copy lost the race. Kernel source and tile configs are unchanged; only
-the registration name -- and, since the GeGLU rename, the ``RLINF_FUSE_SWIGLU*``
-spelling of the kill switches -- differs.
+Kill switches: ``RLINF_FUSE_GEGLU``, ``RLINF_FUSE_QKV_ROPE`` (set to 0 for the
+eager fallback).  Tuning: ``RLINF_FUSE_GEGLU_CFG`` / ``RLINF_FUSE_QKV_CFG`` =
+``"BM,BN,BK,warps,stages"``.  The ``RLINF_FUSE_SWIGLU*`` spellings are honoured as
+aliases; GeGLU is the correct name for ``gelu_tanh(gate) * up``.
 """
 
 import os
