@@ -1,53 +1,31 @@
 """Extra small-M tile candidates for inductor's Triton ``mm``/``bmm`` templates.
 
-The denoise loop runs every expert GEMM at ``M = action_chunk`` (50), so the two
-weight-streaming projections of each layer -- ``down_proj`` (50x4096 @ 4096x1024)
-and ``o_proj`` (50x2048 @ 2048x1024) -- are bandwidth problems whose only
-parallelism is the tile grid.  Inductor's stock list has no ``BLOCK_M < 32``
-entry and clamps ``BLOCK_M`` up to 64, which makes M a single tile: the grid is
-``N / BLOCK_N = 32`` CTAs on a 110-SM card.  This module appends deeper-pipelined
-small-``BLOCK_M`` candidates **for those two shapes only** and lets inductor's
-autotuner pick.  The two attention BMMs are patched separately
-(``install_small_m_bmm_configs``) because ``torch._inductor.kernel.bmm`` binds
-``mm_configs`` by value at import time::
+The denoise loop runs every expert GEMM at ``M = action_chunk`` (50).  Inductor
+clamps ``BLOCK_M`` up to 64, making M a single tile, so ``down_proj`` and
+``o_proj`` run on ``N / BLOCK_N = 32`` CTAs.  This appends deeper-pipelined
+small-``BLOCK_M`` candidates for those two shapes and lets autotune pick.  The two
+attention BMMs are patched separately because ``torch._inductor.kernel.bmm`` binds
+``mm_configs`` by value at import::
 
     P.V    bmm(8x50x1018, 8x1018x256)   -- extra candidates
-    Q.K^T  bmm(8x50x256 , 8x256x1018)   -- pinned, see below
+    Q.K^T  bmm(8x50x256 , 8x256x1018)   -- pinned, autotune's draw spans 20.2%
 
-**Bit-exactness: measured, not derived.**  Safety is a property of the
-``(shape, BLOCK_K, num_stages)`` combination and does not follow from any single
-parameter.  Both plausible rules are false here: at K=4096 ``BLOCK_K`` is inert
-while ``num_stages`` flips ``down_proj``'s output bits; at K=256 both are inert.
-Every shipped entry is digest-verified equal to the unpatched build's output.
-**Do not add a candidate on a parameter argument** -- re-run
-``tools/bitexact_denoise_gemms.py`` / ``tools/bitexact_denoise_bmms.py``.
+Tile safety is measured per ``(shape, BLOCK_K, num_stages)``, never argued from
+the parameters: at K=4096 ``num_stages`` flips ``down_proj``'s output bits while
+``BLOCK_K`` is inert, at K=256 both are inert.  Re-run
+``tools/bitexact_denoise_{gemms,bmms}.py`` before adding a candidate.
 
-**Pinning ``Q.K^T``.**  Inductor cannot separate the top of this shape's field:
-its nine best choices land within 0.0056-0.0062 ms and carry ``BLOCK_K`` 32, 64
-and 128, so the winner -- and with it the fp32 reduction split -- moves from
-process to process on a cold cache.  ``_DEFAULT_BMM_PINS`` replaces the candidate
-list with the measured winner rather than appending to it.  The point is the
-variance, not the mean: it takes the draw-to-draw spread to zero.
+⚠️  sm_120 only.  "Bit-identical" means identical to the unpatched build *on this
+card*, and elsewhere that reference is a different kernel.  The pin declines to
+install off sm_120; the digest set only warns.
 
-⚠️  **Verified on sm_120 only, and "bit-identical" is card-relative** -- it means
-identical to what an unpatched build produces *on this card*, and an unpatched
-build picks a different kernel elsewhere, so the reference itself moves.  The pin
-declines to install off sm_120; the digest set only warns, because the env hooks
-exist to explore.
+These patch names in ``torch._inductor.kernel.{mm,bmm}``, so they are
+process-global: another model in the same process hitting ``m <= 64`` on a listed
+``(N, K)`` gets the wider search too.
 
-**Scope.**  These patches replace names in ``torch._inductor.kernel.{mm,bmm}``,
-so they are process-global: another model compiled in the same process whose GEMM
-hits ``m <= 64`` with one of the listed ``(N, K)`` pairs gets the wider search
-too, and its output bits relative to an unpatched run can move.  Narrow the
-``*_SHAPES`` env var or turn the patch off if that matters.
-
-Kill switches: ``RLINF_SMALL_M_MM=0``, ``RLINF_SMALL_M_BMM=0``,
-``RLINF_SMALL_M_BMM_PIN=0`` (keep the appended candidates, un-pin).
-Tuning: ``RLINF_SMALL_M_{MM,BMM}_{CFGS,SHAPES,MAX_M}``,
-``RLINF_SMALL_M_BMM_PINS``; formats are in the parser docstrings below.
-
-Per-tile measurements, the sweeps behind each choice and the digest runs are in
-the (unpublished) internal record; the numbers they support are in README.md.
+Kill switches ``RLINF_SMALL_M_MM``, ``RLINF_SMALL_M_BMM``,
+``RLINF_SMALL_M_BMM_PIN``; overrides ``RLINF_SMALL_M_{MM,BMM}_{CFGS,SHAPES,MAX_M}``
+and ``RLINF_SMALL_M_BMM_PINS`` (formats in the parser docstrings).
 """
 
 import itertools
@@ -65,8 +43,6 @@ __all__ = [
 
 # (BLOCK_M, BLOCK_N, BLOCK_K, num_stages, num_warps), all digest-verified.
 # num_stages < 5 at BLOCK_K=128 flips down_proj's bits and must stay out.
-# The BLOCK_N=32 / num_warps=4 corner is deliberately absent: filtered_configs
-# clamps num_warps to BLOCK_M*BLOCK_N//256, and that corner is slower anyway.
 _DEFAULT_CFGS = (
     (32, 32, 256, 4, 4),  # champion, both shapes
     (32, 32, 256, 3, 4),
@@ -74,13 +50,11 @@ _DEFAULT_CFGS = (
     (32, 32, 128, 5, 4),
 )
 
-# (N, K) to widen the search for: the action expert's o_proj and down_proj only.
-# Everything else -- prefix, adaRMS, action in/out -- keeps the stock list, so its
-# kernel selection (and output bits) cannot move.
+# (N, K) to widen the search for: the expert's o_proj and down_proj only, so no
+# other GEMM's kernel selection can move.
 _DEFAULT_SHAPES = ((1024, 2048), (1024, 4096))
 
-# Digest-verified for both mm shapes. Anything else via RLINF_SMALL_M_MM_CFGS is
-# allowed but warns -- the hook exists to explore, and safety here is measured.
+# Digest-verified. Anything else via RLINF_SMALL_M_MM_CFGS is allowed, but warns.
 _VERIFIED_CFGS = frozenset(
     {
         (32, 32, 256, 4, 4),
@@ -92,18 +66,14 @@ _VERIFIED_CFGS = frozenset(
 )
 
 # ---- attention bmm ----------------------------------------------------------
-# Shape allowlist. The value is the BLOCK_K the stock champion uses, kept as
-# documentation only -- it used to be asserted as a bit-exactness pin, on the
-# rule the module docstring records as false.
+# Shape allowlist; the value is the stock champion's BLOCK_K, documentation only.
 _DEFAULT_BMM_SHAPES = {
     (256, 1018): 128,  # P.V    bmm(8x50x1018, 8x1018x256)
     (1018, 256): 32,  # Q.K^T  bmm(8x50x256 , 8x256x1018)
 }
 
-# (N, K) -> the single tile inductor may use for that shape. Unlike
-# _DEFAULT_BMM_CFGS this *replaces* the candidate list instead of appending to
-# it: on Q.K^T the choice itself is the problem. sm_120 only -- see the module
-# docstring. Digest-verified against every tile in the sweep.
+# (N, K) -> the only tile inductor may use for that shape. Replaces the candidate
+# list rather than appending: on Q.K^T the choice itself is the problem. sm_120 only.
 _PIN_DEVICE_CAPABILITY = (12, 0)
 _DEFAULT_BMM_PINS = {
     (1018, 256): (64, 128, 32, 4, 4),  # Q.K^T
@@ -111,9 +81,8 @@ _DEFAULT_BMM_PINS = {
 
 # (BLOCK_M, BLOCK_N, BLOCK_K, num_stages, num_warps) per (N, K).
 _DEFAULT_BMM_CFGS = {
-    # P.V. One entry, not a family: inductor times the three num_stages
-    # variants identically and would pick between them by benchmark noise.
-    # Widen with RLINF_SMALL_M_BMM_CFGS if another card wants a different corner.
+    # P.V. One entry, not a family: inductor times the num_stages variants
+    # identically and would pick between them by noise.
     (256, 1018): ((32, 64, 128, 4, 4),),
 }
 

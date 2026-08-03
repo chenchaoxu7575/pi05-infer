@@ -24,15 +24,9 @@ from typing import Callable, Optional, Union
 import torch
 from torch import nn
 
-# ---------------------------------------------------------------------------
-# VENDORED into pi05-infer. This file was `transformers/models/gemma/modeling_gemma.py`
-# and is now `pi05_infer/gemma/modeling_gemma.py`, so the `...`-relative imports
-# below became absolute `transformers.*` imports. NOTHING ELSE about them changed:
-# every symbol here is the *unmodified* transformers symbol, imported from the
-# installed transformers rather than re-vendored. Only the five classes this file
-# actually modifies (GemmaRMSNorm / GemmaMLP / GemmaAttention / GemmaDecoderLayer /
-# GemmaModel) plus `rlinf_fused_denoise` live in this package.
-# ---------------------------------------------------------------------------
+# Vendored from transformers; the relative imports below became absolute, nothing
+# else. Only the five modified classes (GemmaRMSNorm / GemmaMLP / GemmaAttention /
+# GemmaDecoderLayer / GemmaModel) and rlinf_fused_denoise live here.
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.generation import GenerationMixin
@@ -50,17 +44,15 @@ from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
 from transformers.utils import LossKwargs, auto_docstring, can_return_tuple, logging
 
-# GemmaConfig is unmodified by us. It *is* modified by openpi's `transformers_replace`
-# (it adds `use_adarms` / `adarms_cond_dim`), which openpi's own install applies; that
-# is a dependency of openpi, not of this package's fork.
+# GemmaConfig is unmodified by us; openpi's own install adds use_adarms /
+# adarms_cond_dim to it.
 from transformers.models.gemma.configuration_gemma import GemmaConfig
 
 
 logger = logging.get_logger(__name__)
 
-# Fused denoise-loop kernels (RLinf). Optional: if triton is missing, too old,
-# or the kill switches are set, every call site falls back to the plain eager
-# op sequence below it, so this file still runs unmodified everywhere else.
+# Optional: without triton, or with the kill switches set, every call site falls back
+# to the eager op sequence below it.
 try:
     from . import rlinf_fused_denoise as _FUSED_OPS
 
@@ -104,16 +96,13 @@ class GemmaRMSNorm(nn.Module):
             normed_inputs = normed_inputs * (1.0 + self.weight.float())
             return normed_inputs.to(dtype), None  # return in original dtype with None gate
 
-        # adaptive RMSNorm: driven either by a precomputed `mod` or by `cond` via self.dense.
-        # `mod` alone is enough -- callers that supply it (the precomputed modulation table) may
-        # legitimately pass cond=None, since the timestep conditioning would be dead work.
+        # adaRMS: driven by a precomputed `mod`, or by `cond` via self.dense. Callers
+        # supplying `mod` may pass cond=None -- the conditioning would be dead work.
         if cond is not None and cond.shape[-1] != self.cond_dim:
             raise ValueError(f"Expected cond dimension {self.cond_dim}, got {cond.shape[-1]}")
 
-        #self.dense.to(dtype=torch.bfloat16).to(dtype=torch.float32)
-        # adaRMS projection: consume precomputed batched-GEMM slice `mod` when provided
-        # (all per-norm dense(cond) projections coalesced into one GEMM upstream),
-        # else fall back to this norm's own dense. Bit-identical: mod == self.dense(cond).
+        # Consume the precomputed slice when provided, else this norm's own dense.
+        # Bit-identical: mod == self.dense(cond).
         modulation = mod if mod is not None else self.dense(cond)
         # Reshape modulation to broadcast properly: [batch, 1, features] for [batch, seq, features]
         if len(x.shape) == 3:  # [batch, seq, features]
@@ -121,12 +110,6 @@ class GemmaRMSNorm(nn.Module):
         
         scale, shift, gate = torch.chunk(modulation, 3, dim=-1)
         
-        # Apply adaptive normalization: use model weight dtype to ensure compatibility
-        # model_dtype = self.dense.weight.dtype  # Use the model's dtype (bfloat16)
-        # scale = scale.to(model_dtype)
-        # shift = shift.to(model_dtype)
-        # gate = gate.to(model_dtype)
-        # normed_inputs = normed_inputs.to(model_dtype)  # Convert normed_inputs to model dtype
         
         normed_inputs = normed_inputs * (1 + scale.to(torch.float32)) + shift.to(torch.float32)
 
@@ -153,9 +136,8 @@ class GemmaMLP(nn.Module):
         self._geglu_fusable = config.hidden_act in ("gelu_pytorch_tanh", "gelu_new")
 
     def forward(self, x):
-        # Fused path: gelu_tanh(x @ Wg.T) * (x @ Wu.T) in ONE GEMM with two
-        # accumulators over a shared A tile, replacing two GEMMs plus the
-        # activation round-trip through HBM. Returns None when inapplicable.
+        # One GEMM with two accumulators over a shared A tile, replacing two GEMMs plus
+        # the activation round-trip through HBM. Returns None when inapplicable.
         if _FUSED_OPS is not None and self._geglu_fusable:
             act = _FUSED_OPS.fused_gate_up_geglu(
                 x, self.gate_proj.weight, self.up_proj.weight
@@ -318,8 +300,8 @@ class GemmaAttention(nn.Module):
         self.o_proj = nn.Linear(
             config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
         )
-        # Fused QKV projection (built lazily by build_qkv_fused(); see below). Non-persistent:
-        # derived from q/k/v_proj, which stay the checkpoint source of truth.
+        # Built lazily by build_qkv_fused(). Non-persistent: derived from q/k/v_proj,
+        # which stay the checkpoint source of truth.
         self.register_buffer("qkv_fused_weight", None, persistent=False)
         self._qkv_split = None
         # Static KV buffers (prefix + suffix), primed once per predict by prime_kv_static().
@@ -330,13 +312,12 @@ class GemmaAttention(nn.Module):
     def prime_kv_static(self, prefix_k, prefix_v, suffix_len):
         """Allocate (once) and fill the prefix half of this layer's static KV buffer.
 
-        Call once per predict, after the prefix KV cache is built and before the denoise loop.
-        The buffer is [B, kv_heads, prefix_len + suffix_len, head_dim]; the prefix part is
-        written here, the suffix tail is overwritten by each denoise step in forward(). This
-        replaces the per-step ``torch.cat`` that re-copied the whole prefix every step.
+        Call once per predict, after the prefix cache is built. The suffix tail is
+        overwritten by each denoise step, replacing the per-step ``torch.cat`` that
+        re-copied the whole prefix.
 
-        Buffers are reallocated only when the shape changes, so their addresses stay stable
-        across predicts -- required for CUDA-graph replay.
+        ⚠️  Reallocated only on a shape change, so addresses stay stable across
+        predicts -- required for CUDA-graph replay.
         """
         p = prefix_k.shape[2]
         want = (prefix_k.shape[0], prefix_k.shape[1], p + suffix_len, prefix_k.shape[3])
@@ -348,16 +329,14 @@ class GemmaAttention(nn.Module):
         self._kv_prefix_len = p
 
     def build_qkv_fused(self):
-        """Concatenate q/k/v_proj into ONE [q+k+v, hidden] weight so the three skinny GEMMs
-        become a single wider one.
+        """Concatenate q/k/v_proj into one [q+k+v, hidden] weight.
 
-        At bs=1 (M=50) with MQA, k_proj/v_proj emit only 50x256 each -> triton tiles them into
-        grid=8, i.e. 8 of ~110 SMs busy, running ~8x above their memory floor (launch/occupancy
-        bound, ~10% of DRAM bandwidth). Fusing q(2048)+k(256)+v(256) into one 2560-wide output
-        raises the tile count and cuts three launches to one. Mathematically identical: each
-        output column is an independent dot product, so concatenating along N changes nothing.
+        At bs=1 with MQA, k_proj/v_proj emit 50x256 each and tile into grid=8 -- 8 of
+        ~110 SMs busy. One 2560-wide output raises the tile count and cuts three
+        launches to one. Mathematically identical: concatenating along N leaves each
+        output column an independent dot product.
 
-        Only valid without bias (Gemma: attention_bias=False). Idempotent; safe to call twice.
+        Only valid without bias (Gemma: attention_bias=False). Idempotent.
         """
         if getattr(self, "qkv_fused_weight", None) is not None:
             return
@@ -385,12 +364,9 @@ class GemmaAttention(nn.Module):
         hidden_shape = (*input_shape, -1, self.head_dim)
         cos, sin = position_embeddings
 
-        # Fused path: ONE kernel does the QKV projection and applies RoPE in its
-        # epilogue, writing q into a [B, M, Hq, D] buffer (transposed below to
-        # the exact strides the unfused view().transpose() produced) and the
-        # rotated k / raw v straight into the static KV cache tail. Replaces the
-        # QKV GEMM plus three pointwise RoPE/copy kernels. Only valid on the
-        # denoise path (static KV primed, no DynamicCache update).
+        # One kernel does the QKV projection and RoPE, writing q to a [B, M, Hq, D]
+        # buffer and k/v straight into the static KV tail. Denoise path only
+        # (static KV primed, no DynamicCache update).
         if (
             _FUSED_OPS is not None
             and self.qkv_fused_weight is not None
@@ -589,9 +565,8 @@ class GemmaModel(GemmaPreTrainedModel):
         self.rotary_emb = GemmaRotaryEmbedding(config=config)
         self.gradient_checkpointing = False
 
-        # adaRMS batched projection: stacked weight/bias for all per-norm dense(cond) Linears,
-        # built once by build_adarms_stack() before torch.compile. Non-persistent (derived from
-        # the per-norm dense modules, which stay the checkpoint source of truth).
+        # Stacked weight/bias for the per-norm dense(cond) Linears, built once by
+        # build_adarms_stack(). Non-persistent, derived from those modules.
         self.register_buffer("adarms_Wstacked", None, persistent=False)      # [n*3072, cond_dim]
         self.register_buffer("adarms_bias_stacked", None, persistent=False)  # [n*3072]
         self._adarms_num = 0
@@ -602,10 +577,9 @@ class GemmaModel(GemmaPreTrainedModel):
     def build_adarms_stack(self):
         """Coalesce the N per-norm adaRMS dense(cond) projections into one stacked GEMM.
 
-        Enumerates the dense modules in the SAME order GemmaModel.forward consumes them
-        (per layer: input_layernorm, post_attention_layernorm; then final self.norm) and
-        stacks their weights/biases. Idempotent; no-op when the model has no adaRMS. Must run
-        after weights are loaded + dtype-converted and before torch.compile traces forward.
+        ⚠️  Stacks the dense modules in the same order ``GemmaModel.forward`` consumes
+        them. Must run after weights are loaded and dtype-converted, and before
+        ``torch.compile`` traces forward. Idempotent; no-op without adaRMS.
         """
         norms = []
         for layer in self.layers:
@@ -653,14 +627,12 @@ class GemmaModel(GemmaPreTrainedModel):
     def refresh_derived_weights(self):
         """Re-derive the weight-derived tensors IN PLACE from the current weights.
 
-        MUST be called after the weights change in place (e.g. an RL rollout weight sync):
-        these tensors are copies computed FROM the weights, so they go stale even though the
-        captured CUDA graph stays valid (the graph references weight ADDRESSES, which in-place
-        updates preserve).
+        ⚠️  **Call after any in-place weight change (e.g. an RL weight sync).** The
+        captured graph stays valid because it references addresses, but these tensors
+        are copies computed *from* the weights and go stale silently.
 
-        Uses ``copy_`` rather than reallocating precisely so the derived tensors keep their
-        addresses too -- a captured graph refers to these buffers as well, so replacing them
-        with new tensors would make the graph read freed/stale memory.
+        Uses ``copy_`` rather than reallocating, so they keep their addresses too --
+        the graph refers to these buffers as well.
         """
         if self.adarms_Wstacked is not None:
             norms = []

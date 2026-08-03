@@ -11,42 +11,27 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Extraction equivalence: does ``pi05_infer`` still compute what RLinf computes?
+r"""Extraction equivalence: does ``pi05_infer`` still compute what RLinf computes?
 
-The claim in ``EXTRACTION_NOTES.md`` §8.5 -- "end-to-end actions [1,50,6] float64, fixed
-seed, vs the RLinf path: bitwise equal, max|d| = 0.00e+00" -- was produced by two separate
-``--dump-actions`` processes in base ``max-autotune``, and **the original logs were never
-archived**. That mode is now known to have a ~4e-3 cross-process noise floor
-(``RESULTS_dump_actions_determinism.md``), which cannot manufacture a false 0.00e+00 but
-does mean a re-run has to be done differently to be reproducible at all.
+Loads both trees into ONE process, so there is one autotune state and one set of
+cuBLAS handles and the cross-process drift that defeats ``--dump-actions`` cannot
+enter::
 
-So this re-runs it **with both code trees loaded into ONE process**:
+    arm A = rlinf.models.embodiment.openpi.get_model   (site-packages transformers)
+    arm B = pi05_infer.build_model                     (vendored pi05_infer.gemma)
 
-    arm A = ``rlinf.models.embodiment.openpi.get_model``   (site-packages transformers)
-    arm B = ``pi05_infer.build_model``                     (vendored pi05_infer.gemma)
+Each arm runs twice as its own control: an arm that is not reproducible against
+itself yields INCONCLUSIVE, never PASS.
 
-One process means one autotune state and one set of cuBLAS handles, so the cross-process
-drift that the base-mode gate suffers from cannot enter. Each arm is additionally run
-twice, which is the mandatory same-arm control: if an arm is not reproducible against
-itself the tool reports INCONCLUSIVE and never PASS.
-
-Compared, in order of directness:
-
-  ``weights``   sha256 over every expert parameter, arm A vs arm B -- proves the two
-                trees were handed the same checkpoint before anything is computed.
-  ``prefix/kv`` the 18-layer PaliGemma KV cache. Both arms run the *same* site-packages
-                SigLIP/PaliGemma here, so this stage is expected to be identical and any
-                difference would mean the extraction moved the prefix.
-  ``step<i>``   every denoise step -- this is where the two trees actually differ
-                (vendored ``pi05_infer.gemma`` vs the container's patched
-                ``transformers.models.gemma``).
-  ``actions``   the [1,50,6] tensor the historical claim was made on.
+Compared in order of directness: ``weights`` (sha256 per expert parameter, before
+anything is computed), ``prefix/kv`` (same site-packages SigLIP on both arms, so
+a difference means the extraction moved the prefix), ``step<i>`` (where the trees
+actually differ), ``actions``.
 
 Usage::
 
-    CUDA_VISIBLE_DEVICES=1 TORCHINDUCTOR_CACHE_DIR=/tmp/ti_extract \\
-      /opt/venv/openpi/bin/python tools/bitexact_extraction.py \\
-        --out /tmp/bitexact_backfill/extraction.json
+    TORCHINDUCTOR_CACHE_DIR=/tmp/ti_extract python tools/bitexact_extraction.py \
+      --out /tmp/bitexact_backfill/extraction.json
 """
 
 from __future__ import annotations

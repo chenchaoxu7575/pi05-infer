@@ -11,30 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Drop the dead tail of the prefix LM's *last* decoder layer.
+"""Drop the dead tail of the prefix LM's last decoder layer.
 
-``sample_actions`` runs the PaliGemma prefix once and throws its output embedding
-away -- only the KV cache is consumed, by the denoise loop.  Nothing downstream of
-layer 17's ``k_proj``/``v_proj`` has a consumer::
+``sample_actions`` throws the prefix's output embedding away -- only the KV cache
+is consumed. So nothing downstream of layer 17's ``k_proj``/``v_proj`` has a
+consumer: q_proj, attention, o_proj, both residuals, the post-attention norm and
+the MLP are all dead. That is 99.1 % of the layer, 5.5 % of the 18-layer LM.
 
-    input_layernorm -> k_proj, v_proj, RoPE(k), cache.update    <- LIVE
-    q_proj, attention, o_proj, residual, post_attention_layernorm,
-    mlp, residual                                               <- DEAD
-
-That is 99.1 % of the last layer, 5.5 % of the 18-layer LM.
-
-**Why a monkeypatch.**  Same boundary as ``prefix_qkv_fused.py``: the prefix runs
-on the installed transformers, not the vendored fork, so this swaps one layer
-instance's ``forward`` and leaves the module tree, parameter names and
-``state_dict`` untouched.  The joint prefix+suffix training forward never calls
-``GemmaDecoderLayer.forward`` and is structurally unaffected.
-
-⚠️  **Not applied when the model has a VLM value head** -- that head reads exactly
-this hidden state.  It is present in every shipped pi0.5 PPO config, absent for
-DSRL/SAC and for this inference-only package.  **Quote the gain only with this
-condition attached.**  Also declines per call whenever ``use_cache`` is off, no
-cache was handed in, ``output_attentions`` is requested, or RoPE tables are
-missing; then the original forward runs unchanged.
+⚠️  Declines to install when the model has a VLM value head, which reads exactly
+this hidden state -- present in every shipped pi0.5 PPO config, absent for
+DSRL/SAC and here. **Quote the gain only with that condition attached.** Also
+declines per call when ``use_cache`` is off, no cache was passed,
+``output_attentions`` is requested, or RoPE tables are missing.
 
 Kill switch: ``RLINF_SKIP_LAST_LM_LAYER=0``.
 """
@@ -105,10 +93,8 @@ def _kv_only_forward(
     normed, _gate = self.input_layernorm(hidden_states, adarms_cond)
 
     hidden_shape = (*normed.shape[:-1], -1, attn.head_dim)
-    # NOT fused into one [k+v, hidden] GEMM, unlike the other 17 layers
-    # (pi05_infer/prefix_qkv_fused.py): at N = 512 cuBLAS switches to a kernel whose
-    # K-accumulation differs, and the resulting KV cache moves by 1 bfloat16 ULP.
-    # Worth 22 us of a 765 us win -- not worth spending bit-exactness on.
+    # Deliberately NOT fused, unlike the other 17 layers: at N = 512 cuBLAS picks a
+    # kernel whose K-accumulation differs and the KV cache moves by 1 ULP.
     key_states = attn.k_proj(normed).view(hidden_shape).transpose(1, 2)
     value_states = attn.v_proj(normed).view(hidden_shape).transpose(1, 2)
 

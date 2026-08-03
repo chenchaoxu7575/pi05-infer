@@ -11,35 +11,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Same-process, kernel-level bit-exactness gate for the fused prefix QKV GEMM.
+r"""Same-process, kernel-level bit-exactness gate for the fused prefix QKV GEMM.
 
-``tools/bitexact_gate.sh`` compares two *processes*, and under ``max-autotune`` two
-processes running byte-identical code already disagree (coordinate-descent tuning
-re-benchmarks per process). This gate has no such blind spot: it builds the model
-**once**, runs the prefix unfused, installs
-``pi05_infer/prefix_qkv_fused.install_fused_prefix_qkv`` on the live object, and
-runs the identical input again. Nothing else in the process changed, so any
-difference is the fusion and only the fusion.
+``bitexact_gate.sh`` compares two processes, and under ``max-autotune`` two
+processes running identical code already disagree. This has no such blind spot:
+it builds the model once, runs the prefix unfused, installs the fusion on the
+live object, and runs the identical input again -- so any difference is the
+fusion and nothing else.
 
-What is compared
-----------------
-* Every layer's K and V, byte for byte. That is the entire prefix->denoise
-  interface (``sample_actions`` consumes nothing else from the prefix LM).
-* Because layer *i*'s K/V is a function of layer *i-1*'s full output, layers 1..17
-  matching also proves ``q``, the attention, ``o_proj`` and the MLP are untouched.
-* Layer 0's raw ``q``/``k``/``v`` are additionally hashed directly, via a forward
-  hook on ``q_proj``/``k_proj``/``v_proj`` (unfused arm) versus a re-derivation
-  from the fused weight (fused arm) -- the most direct possible statement of
-  "concatenating along N changed nothing".
+Compares every layer's K and V byte for byte, which is the entire prefix->denoise
+interface; since layer i's KV depends on layer i-1's full output, that also
+covers q, the attention, ``o_proj`` and the MLP. Layer 0's raw q/k/v are hashed
+directly as well, via forward hooks versus a re-derivation from the fused weight.
 
-Runs eager by default so the comparison is not entangled with inductor autotuning.
-``--compile-mode`` re-runs the same check on the compiled path; note that a
-*recompile* happens between the arms there, so a difference in that mode is not
-automatically attributable to the fusion.
-
-Usage::
-
-    python tools/bitexact_prefix_qkv.py
+Runs eager by default so the comparison is not entangled with autotuning.
 """
 
 from __future__ import annotations
@@ -100,7 +85,7 @@ def main() -> int:
     from standalone_infer_bench import make_env_obs
 
     from pi05_infer import build_model
-    from pi05_infer.prefix_qkv_fused import fuse_enabled, install_fused_prefix_qkv
+    from pi05_infer.patches.prefix_qkv_fused import fuse_enabled, install_fused_prefix_qkv
 
     assert fuse_enabled(), (
         "RLINF_FUSE_PREFIX_QKV is off, so the 'on' arm would be identical to the 'off' "

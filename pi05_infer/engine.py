@@ -14,23 +14,18 @@
 """Pure pi0.5 / pi0 inference engine, extracted from RLinf.
 
 Source: ``rlinf/models/embodiment/openpi/openpi_action_model.py`` at rev
-``cbb9d2fc`` (1824 lines; verbatim copy kept in ``_extract_src/`` for diffing).
+``cbb9d2fc``; the verbatim original is in ``_extract_src/`` for diffing, and
+``EXTRACTION_NOTES.md`` lists what was dropped.
 
-What was kept: the inference path only --
-``predict_action_batch`` -> ``sample_actions`` -> ``sample_mean_var_val`` ->
-``get_velocity`` -> ``get_suffix_out``, plus ``_build_prefix_cache``,
-``enable_torch_compile``, the Stage-1 denoise CUDA-graph capture/replay, the
-adaRMS modulation table, and ``invalidate_weight_derived_caches``.
+Kept: ``predict_action_batch`` -> ``sample_actions`` -> ``sample_mean_var_val``
+-> ``get_velocity`` -> ``get_suffix_out``, plus ``_build_prefix_cache``,
+``enable_torch_compile``, the Stage-1 denoise CUDA graph, the adaRMS table and
+``invalidate_weight_derived_caches``.  Dropped: everything RL.
 
-What was dropped: everything RL. See ``EXTRACTION_NOTES.md`` for the full list
-and for the two hot-path lines that were deliberately NOT dropped.
-
-**Hot-path fidelity rule.** Every statement inside one denoise step is byte-identical
-to the RLinf original, including ``get_logprob_norm`` and the zero-valued ``value_t``.
-Those two are RL instrumentation, but they sit inside the measured per-step region (and
-inside the captured CUDA graph), so deleting them would change the kernel count that the
-238-kernels/step regression gate measures. They are computed and discarded.
-Deletions are confined to code outside the per-step body.
+⚠️  Every statement inside one denoise step is byte-identical to the original,
+including the RL-only ``get_logprob_norm`` and zero-valued ``value_t``: they sit
+inside the captured graph, so removing them would change the kernel count the
+regression gate measures.  Deletions are confined to code outside the step body.
 """
 
 import logging
@@ -42,13 +37,9 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-# Opt-in: no-op openpi's ``@at.typecheck`` (jaxtyped + beartype runtime
-# type/shape validation on the ``Observation`` dataclass). On the eager PyTorch
-# rollout path it costs ~2ms/predict of pure CPU with the GPU idle (verified
-# bit-exact: the check never changes values). Rollout obs shapes are stable, so
-# this is safe once the pipeline is validated. Must run BEFORE openpi model
-# classes are decorated at import, hence before the openpi imports below.
-# Default off (typecheck stays on); set RLINF_DISABLE_OPENPI_TYPECHECK=1 to enable.
+# Opt-in: no-op openpi's runtime type/shape validation, ~2 ms/predict of pure CPU.
+# Must run before openpi's classes are decorated at import, hence before the imports.
+# Default off; RLINF_DISABLE_OPENPI_TYPECHECK=1 to enable.
 if os.environ.get("RLINF_DISABLE_OPENPI_TYPECHECK") == "1":
     import openpi.shared.array_typing as _at
 
@@ -62,34 +53,27 @@ from torch.utils._pytree import tree_map  # noqa: E402
 from pi05_infer._vendored.base_policy import BasePolicy  # noqa: E402
 from pi05_infer._vendored.nvtx import nvtx_range  # noqa: E402
 
-# The vendored fork, NOT ``openpi.models_pytorch.pi0_pytorch``: this is what makes
-# the action expert resolve to ``pi05_infer.gemma`` rather than to whatever
-# ``transformers.models.gemma`` the container happens to have. See
-# ``pi05_infer/openpi_patched/__init__.py``.
+# The vendored fork, not openpi's: this is what makes the action expert resolve to
+# pi05_infer.gemma rather than the container's transformers.models.gemma.
 from pi05_infer.openpi_patched.pi0_pytorch import (  # noqa: E402
     PI0Pytorch,
     make_att_2d_masks,
 )
-from pi05_infer.prefix_last_layer import install_skip_last_lm_layer  # noqa: E402
-from pi05_infer.prefix_qkv_fused import (  # noqa: E402
+from pi05_infer.patches.prefix_last_layer import install_skip_last_lm_layer  # noqa: E402
+from pi05_infer.patches.prefix_qkv_fused import (  # noqa: E402
     install_fused_prefix_qkv,
     refresh_fused_prefix_qkv,
 )
 
 logger = logging.getLogger(__name__)
 
-# Kill switch for the dead-``adarms_cond`` elision in ``get_suffix_out`` (see there).
-# Default on; set ``RLINF_SKIP_DEAD_ADARMS_COND=0`` to restore the old behaviour, i.e.
-# compute the timestep conditioning on every denoise step even though nothing reads it.
-# Read once at import so the branch is a Python constant during CUDA-graph capture.
+# Skip the timestep conditioning nothing reads (see get_suffix_out). Read at import so
+# the branch is a Python constant during graph capture. RLINF_SKIP_DEAD_ADARMS_COND=0.
 _SKIP_DEAD_ADARMS_COND = os.environ.get("RLINF_SKIP_DEAD_ADARMS_COND", "1") != "0"
 
-# Kill switch for hoisting the step-invariant part of the denoise step out of the loop
-# (see ``_build_step_invariants``): the attention mask, the position ids and the rotary
-# cos/sin table are byte-identical on all ``num_steps`` Euler steps, so they are built
-# once per predict into persistent buffers instead of once per step.
-# Default on; ``RLINF_HOIST_STEP_INVARIANTS=0`` restores the per-step computation.
-# Read once at import so every branch below is a Python constant during CUDA-graph capture.
+# Build the attention mask / position ids / rotary table once per predict instead of
+# per step (see _build_step_invariants). Read at import, as above.
+# RLINF_HOIST_STEP_INVARIANTS=0.
 _HOIST_STEP_INVARIANTS = os.environ.get("RLINF_HOIST_STEP_INVARIANTS", "1") != "0"
 
 
@@ -97,8 +81,7 @@ def _to_numpy(x):
     return np.asarray(x.detach().cpu()) if torch.is_tensor(x) else x
 
 
-# The card every number in the README was measured on, and the only card the tile
-# choices and their bit-exactness digests were verified against.
+# The only card the numbers and the bit-exactness digests were verified on.
 _VERIFIED_DEVICE_CAPABILITY = (12, 0)  # sm_120, GB202
 _arch_warned = False
 
@@ -212,27 +195,20 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
         self.torch_compile_enabled = False
         self._torch_compile_mode = None
 
-        # Prefix LM last layer: only its k_proj/v_proj feed the KV cache, everything
-        # after that is dead because sample_actions discards the prefix hidden state.
-        # Installed here so it lands BEFORE enable_torch_compile, letting inductor drop
-        # the dead ops from the traced graph. See pi05_infer/prefix_last_layer.py for
-        # the conditions under which it declines to install (VLM value head, kill switch).
+        # Installed here so it lands before enable_torch_compile and inductor can drop
+        # the dead ops. Declines to install under conditions listed in the module.
         self._prefix_last_layer_skipped = install_skip_last_lm_layer(self)
 
         # ===== Denoise-step CUDA graph (Stage 1, inference only) =====
-        # Cache for the suffix attention-mask tensor. The parent embed_suffix builds it
-        # via torch.tensor(<python list>), a host->device op that is forbidden while a
-        # CUDA graph is capturing. The pattern is fixed (depends only on action_horizon /
-        # pi05), so we cache the device tensor on the first call and reuse it thereafter.
+        # The parent embed_suffix builds this mask via torch.tensor(<list>), an H2D op
+        # forbidden during capture. The pattern is fixed, so cache the device tensor.
         self._suffix_att_masks_cache = None
-        # Lazily-captured single flow_ode denoise step. Populated on the first eval-shaped
-        # sample_actions call when cuda_graph_manager is set (see capture_cuda_graph).
+        # Lazily captured on the first eval-shaped sample_actions when the manager is set.
         self._denoise_graph_captured = False
         self._denoise_graph_spec = None  # config the graph was captured for
         self._denoise_static = None  # static input buffers + persistent KV cache
-        # Step-invariant denoise inputs, hoisted out of the loop (see _build_step_invariants).
-        # Persistent buffers: the captured graph records their ADDRESSES, so they are refilled
-        # with copy_ on every predict and never reallocated once the graph exists.
+        # Hoisted step-invariant inputs. Persistent: the graph records their addresses,
+        # so they are refilled with copy_ and never reallocated.
         self._step_inv = None
         self._suffix_masks_cache = None  # (key, pad_masks, att_masks, embs_dtype)
         self._timesteps_cache = None  # (num_steps, device, dtype) -> the schedule tensor
@@ -391,25 +367,21 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
 
         x_t = noise
 
-        # Build the adaRMS modulation table BEFORE any CUDA-graph capture: it calls eager
-        # embed_suffix/dense (capture-illegal). Cached, so it runs once; the captured denoise
-        # step then only gathers from this static table (device gather, capture-safe).
+        # Before any capture: this calls eager embed_suffix/dense, which is capture-illegal.
+        # The captured step then only gathers from the static table.
         self._get_adarms_table(state, noise, num_steps, device)
 
-        # Same trick, same reason: the attention mask, the position ids and the rotary cos/sin
-        # are identical on all num_steps Euler steps, so build them ONCE here into persistent
-        # buffers. Must happen before _ensure_denoise_graph so the capture records those
-        # buffers' addresses (and so this call's eager construction stays outside the capture).
+        # Same reason. Must precede _ensure_denoise_graph so the capture records these
+        # buffers' addresses and their eager construction stays outside it.
         self._build_step_invariants(state, x_t, prefix_pad_masks)
 
-        # Prime the static KV buffers once per predict, so each denoise step writes only the
-        # 50 new suffix tokens instead of re-concatenating the whole 968-token prefix.
+        # Once per predict, so each step writes only the 50 new suffix tokens instead of
+        # re-concatenating the 968-token prefix.
         expert = self.paligemma_with_expert.gemma_expert.model
         if hasattr(expert, "prime_kv_static"):
             expert.prime_kv_static(past_key_values, self.config.action_horizon)
 
-        # Denoise-step CUDA graph (Stage 1): replay a captured single flow_ode step for
-        # every step. Lossless.
+        # Stage 1: replay one captured flow_ode step for every step. Lossless.
         use_denoise_graph = self.is_cuda_graph_enabled() and self._ensure_denoise_graph(
             x_t, state, prefix_pad_masks, past_key_values, num_steps
         )
@@ -421,9 +393,8 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
             for idx in range(num_steps):
                 with nvtx_range("denoise/step", color="orange"):
                     if use_denoise_graph:
-                        # Wide-graph replay: expert + value + Euler + logprob in one launch.
-                        # Draw sample_noise eagerly first so RNG consumption matches the eager
-                        # path (its result is unused since flow_ode std == 0).
+                        # Expert + value + Euler + logprob in one launch. sample_noise is
+                        # drawn eagerly first so RNG consumption matches the eager path.
                         self.sample_noise(x_t.shape, device)
                         x_t, _log_prob, _value_t = self._replay_denoise_step(x_t, idx)
                     else:
@@ -460,13 +431,11 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
         return timesteps
 
     def _suffix_masks(self, state, x_t, device):
-        """The suffix pad / attention masks, which are constants of the model config.
+        """The suffix pad / attention masks, which are config constants.
 
-        ``embed_suffix`` rebuilds them on every denoise step, but neither depends on the
-        timestep or on the noise *values* -- only on ``action_horizon``, ``pi05`` and the
-        batch size (``torch.ones(...)`` plus a fixed ``att_masks`` pattern). Built once with
-        the real ``embed_suffix`` (so the values and dtypes are the parent's, not a
-        re-derivation) and cached for the lifetime of the model.
+        ``embed_suffix`` rebuilds them every step, but they depend only on
+        ``action_horizon``, ``pi05`` and batch size. Built once via the real
+        ``embed_suffix`` so the values and dtypes are the parent's.
 
         Returns ``(pad_masks, att_masks, embs_dtype)``.
         """
@@ -486,11 +455,10 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
     def _compute_step_invariants(self, state, x_t, prefix_pad_masks):
         """Compute the denoise inputs that are identical on every Euler step.
 
-        ``suffix_pad_masks`` is an all-ones constant and ``prefix_pad_masks`` is fixed for the
-        whole predict, so ``position_ids = sum(prefix_pad_masks) + cumsum(suffix_pad_masks) - 1``
-        does not move between steps -- and neither does the rotary ``cos``/``sin`` derived from
-        it, nor the full 4-D attention mask. Same ops, same order, same values as the per-step
-        code in ``get_suffix_out`` / ``GemmaModel.forward``; only the call count changes.
+        Both pad masks are fixed for the whole predict, so ``position_ids`` and
+        the rotary ``cos``/``sin`` and 4-D mask derived from them do not move
+        between steps. Same ops in the same order as the per-step code; only the
+        call count changes.
 
         Returns ``(attn_mask_4d, position_ids, cos, sin)``.
         """
@@ -511,9 +479,8 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
         position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
         attn_mask_4d = self._prepare_attention_masks_4d(full_att_2d_masks)
 
-        # Rotary table. ``GemmaModel.forward`` calls ``rotary_emb(hidden_states, position_ids)``
-        # and hidden_states is ``inputs_embeds`` cast to bf16 when the expert is bf16 -- the only
-        # thing rotary_emb reads off it is dtype/device, so reproduce that choice exactly.
+        # Rotary table. rotary_emb only reads dtype/device off hidden_states, so reproduce
+        # the parent's dtype choice exactly.
         expert = self.paligemma_with_expert.gemma_expert.model
         hidden_dtype = embs_dtype
         if (
@@ -528,12 +495,10 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
     def _build_step_invariants(self, state, x_t, prefix_pad_masks):
         """Refresh the hoisted step-invariant denoise inputs for this predict.
 
-        Allocated once and refilled **in place** afterwards: the Stage-1 CUDA graph records the
-        addresses of whatever ``get_suffix_out`` reads, so reallocating between predicts would
-        leave the graph pointing at a freed buffer. The shapes that could force a reallocation
-        (batch size, prefix length, action horizon) are all part of ``_denoise_graph_signature``,
-        so a shape change invalidates the graph in the same breath -- asserted below rather than
-        assumed.
+        ⚠️  Allocated once, refilled **in place**: the Stage-1 graph records the
+        addresses these buffers had at capture, so reallocating would leave it
+        pointing at freed memory. Any shape that could force a reallocation is
+        part of ``_denoise_graph_signature`` -- asserted below, not assumed.
         """
         if not _HOIST_STEP_INVARIANTS:
             return
@@ -563,21 +528,14 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
     def invalidate_weight_derived_caches(self):
         """Drop every cache derived from the model weights.
 
-        **Call this after an RL rollout weight sync.** In-place weight updates keep the captured
-        CUDA graph valid (it references addresses, not values), but these derived tensors are
-        computed FROM the weights and would otherwise silently keep serving stale values:
-          - ``_adarms_table``: the precomputed per-timestep adaRMS modulations (built from the
-            37 ``dense`` weights),
-          - the expert's stacked adaRMS weight and fused QKV weights,
-          - the prefix LM's fused QKV weights (``prefix_qkv_fused.py``).
-        Cheap: the table is rebuilt lazily on the next ``sample_actions`` (one-off, ~ms).
+        **Call this after an RL rollout weight sync.** An in-place weight update
+        keeps the captured CUDA graph valid (it references addresses), but these
+        tensors are computed *from* the weights and would keep serving stale
+        values: ``_adarms_table``, the expert's stacked adaRMS and fused QKV
+        weights, and the prefix LM's fused QKV weights. All rebuilt lazily.
 
-        The hoisted step invariants (``_step_inv``: attention mask, position ids, rotary
-        cos/sin) are deliberately NOT listed: none of them is derived from a weight. The
-        rotary table comes from ``rotary_emb.inv_freq``, a non-persistent buffer computed from
-        ``config.rope_theta``/``head_dim`` -- config, not a parameter, so a weight sync cannot
-        move it. They are also rebuilt from scratch on every ``sample_actions``, so they cannot
-        go stale in the first place.
+        ``_step_inv`` is deliberately not listed -- it derives from config, not
+        from any parameter, and is rebuilt every ``sample_actions`` anyway.
         """
         expert = self.paligemma_with_expert.gemma_expert.model
         if hasattr(expert, "refresh_derived_weights"):
@@ -598,14 +556,13 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
             )
 
     def _get_adarms_table(self, ref_state, ref_noise, num_steps, device):
-        """Precompute (once, cached by num_steps) the adaRMS modulation for every denoise step.
+        """Precompute the adaRMS modulation for every denoise step, cached by num_steps.
 
-        The 37 per-norm dense(cond) projections depend ONLY on the diffusion timestep (a fixed
-        linspace schedule, input-independent), so the whole [num_steps, B, n_norm, 3072] table is
-        built once and indexed per step -- removing the 37 memory-bound projections (~3.9ms/predict,
-        serial on the critical path) from every denoise step. Built with the real per-norm dense
-        modules over the exact timesteps the loop uses (timesteps[s], via the same embed_suffix),
-        so table[s, :, i] == dense_i(cond_s) bit-for-bit vs the per-dense reference.
+        The 37 per-norm ``dense(cond)`` projections depend only on the diffusion
+        timestep, which follows a fixed input-independent schedule, so the whole
+        table is built once and indexed per step. Built with the real dense
+        modules over the timesteps the loop uses, so it is bit-identical to
+        computing them per step.
         """
         if (
             getattr(self, "_adarms_table_key", None) == num_steps
@@ -648,18 +605,10 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
     ):
         """CUDA-graph-safe wrapper around the parent ``embed_suffix``.
 
-        The parent builds the suffix attention-mask via ``torch.tensor(<python list>)``
-        (``pi0_pytorch.py``), the only host->device tensor construction in this code path
-        and one that is forbidden while a CUDA graph is capturing. The mask pattern is fixed
-        (depends only on ``action_horizon`` / ``pi05``), so we intercept that single call: on
-        the first invocation we build the device tensor normally and cache it; afterwards
-        (including during graph capture/replay) we return the cached tensor. The expand to
-        batch size that follows on the parent side is a view op and is capture-safe.
-
-        Numerically identical to the parent: the cached tensor holds the exact same values.
-
-        ``skip_adarms_cond`` is forwarded verbatim (see the parent): it drops the dead
-        timestep-conditioning computation when the caller already holds ``adarms_mod``.
+        The parent builds the suffix attention mask with ``torch.tensor(<list>)``
+        -- the only host->device construction on this path, and illegal during
+        graph capture. The pattern is fixed, so the first call caches the device
+        tensor and later calls reuse it. Same values either way.
         """
         orig_tensor = torch.tensor
 
@@ -1063,7 +1012,7 @@ class OpenPi0Inference(PI0Pytorch, BasePolicy):
         # the Q.K^T tile. Must run before the first compile, which is when the
         # templates are autotuned. Digest-verified on sm_120 only -- see
         # inductor_mm_tiles.py. RLINF_SMALL_M_MM=0 / RLINF_SMALL_M_BMM=0 opt out.
-        from pi05_infer.inductor_mm_tiles import (
+        from pi05_infer.patches.inductor_mm_tiles import (
             install_small_m_bmm_configs,
             install_small_m_mm_configs,
         )

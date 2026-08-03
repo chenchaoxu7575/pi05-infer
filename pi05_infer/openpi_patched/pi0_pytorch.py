@@ -197,10 +197,9 @@ class PI0Pytorch(nn.Module):
         pad_masks = []
         att_masks = []
 
-        # Process images: one ViT call over all views stacked on the batch dim
-        # instead of a per-view loop. The batch dim is per-sample independent,
-        # so results match the loop, but at bs=1 the ViT sees batch=num_views
-        # and fills the GPU far better (9.5 -> 6.4 ms/predict on RTX PRO 5000).
+        # One ViT call over all views stacked on the batch dim, not a per-view
+        # loop. Batch is per-sample independent so results match; at bs=1 it fills
+        # the GPU far better (9.5 -> 6.4 ms/predict).
         nvtx.push_range("prefix/vision_siglip", color="darkgreen")
         bsize = images[0].shape[0]
 
@@ -241,12 +240,9 @@ class PI0Pytorch(nn.Module):
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
 
-        # Every element appended to the `att_masks` list above is a 0 (image
-        # tokens and language tokens all share one full-attention block), and
-        # its length equals the prefix length `pad_masks.shape[1]`. Build the
-        # mask directly on the device instead of `torch.tensor(<python list>)`:
-        # the latter is a synchronous host->device copy on the hot path and is
-        # illegal while a CUDA graph is capturing. Same shape/dtype/values.
+        # `att_masks` above is all zeros of length `pad_masks.shape[1]`. Build it
+        # on device rather than via `torch.tensor(<list>)`, which is a sync H2D copy
+        # on the hot path and illegal during CUDA-graph capture. Same values.
         att_masks = torch.zeros(
             pad_masks.shape[0],
             pad_masks.shape[1],
@@ -260,17 +256,11 @@ class PI0Pytorch(nn.Module):
         """Embed state, noisy_actions, timestep to prepare for Expert Gemma processing.
 
         Args:
-            skip_adarms_cond: pi05 only. When the caller already has the precomputed adaRMS
-                modulation (``adarms_mod``), the returned ``adarms_cond`` is dead -- the
-                consumer in ``modeling_gemma`` prefers ``adarms_mod`` and never falls through
-                to the ``dense(cond)`` branch. On pi05 the timestep embedding feeds *nothing*
-                else (``action_time_emb`` is just ``action_emb``), so the whole sinusoid +
-                two-layer time MLP can be skipped and ``adarms_cond`` returned as ``None``.
-                Defaults to ``False``, i.e. today's behaviour: every caller that does not pass
-                ``adarms_mod`` still gets a fully computed ``cond``.
-
-                This is a plain Python flag resolved at trace time (never a test on a device
-                tensor), so ``embed_suffix`` stays safe to run inside a captured CUDA graph.
+            skip_adarms_cond: pi05 only. When the caller already holds ``adarms_mod``
+                the returned ``adarms_cond`` is dead, and on pi05 the timestep embedding
+                feeds nothing else -- so the sinusoid and time MLP can be skipped.
+                A trace-time Python flag, never a test on a device tensor, so this stays
+                safe inside a captured CUDA graph.
         """
         embs = []
         pad_masks = []

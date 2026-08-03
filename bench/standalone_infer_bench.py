@@ -11,24 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Standalone pi0.5 bs=1 inference latency benchmark for ``pi05_infer``.
+r"""Standalone pi0.5 bs=1 inference latency benchmark for ``pi05_infer``.
 
-Adapted from ``RLinf-pi05-nsys-profile/benchmarks/pi05_infer/standalone_infer_bench.py``
-(rev cbb9d2fc). Only the model-construction seam changed: ``build_model`` now calls
-``pi05_infer.build_model`` instead of ``rlinf.models.embodiment.openpi.get_model``,
-and ``predict_action_batch`` returns actions directly instead of
-``(actions, rl_dict)``. The timing harness, the dummy observation generator and the
-phase decomposition are otherwise unchanged.
+Adapted from RLinf's ``standalone_infer_bench.py`` (rev cbb9d2fc); only the
+model-construction seam changed. The timing harness, dummy observation generator
+and phase decomposition are unchanged.
 
-Usage (inside the benchmark container):
-    /opt/venv/openpi/bin/python bench/standalone_infer_bench.py \
-        --model-path /path/to/RLinf-Pi05-LIBERO-SFT   # or $PI05_MODEL_PATH
+Usage::
 
-    # sync-timed phase breakdown
-    ... --phases
-
-    # under nsys (see README.md)
-    nsys profile ... --capture-range=cudaProfilerApi ... --cuda-profiler
+    python bench/standalone_infer_bench.py --model-path /path/to/ckpt   # or $PI05_MODEL_PATH
+    ... --phases          # sync-timed phase breakdown
+    ... --stage1          # hand-captured denoise CUDA graph
 """
 
 import argparse

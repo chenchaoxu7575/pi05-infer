@@ -11,31 +11,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Measure the *achievable* dense bf16 tensor-core throughput of this GPU.
+r"""Measure the *achievable* dense bf16 tensor-core throughput of this GPU.
 
-Why this exists: every MFU number in the pi0.5 analysis so far divided by an
-**assumed** peak (240 TFLOP/s in ``MFU_denoise_analysis.md``, or 268 TFLOP/s from
-``110 SM x 2.377 GHz x 1024 FLOP/clk``). Neither was ever measured. The prefix
-phase is compute-bound, so its denominator *is* this number -- an assumed peak
-propagates straight into a wrong headroom estimate.
+MFU needs a measured denominator, not an assumed peak. Compute-side twin of the
+DRAM bandwidth probe.
 
-This is the compute-side twin of ``ncu_occupancy/bwbench.py`` (which measured the
-achievable DRAM read bandwidth at 1222 GB/s).
+Two traps this is built to avoid:
 
-Two traps this script is built to avoid:
+1. ⚠️  **Never fill operands with ``torch.empty``/``zeros``.** CUDA returns
+   zeroed pages; almost no bits toggle, the power cap is never hit, the clock runs
+   ~18 % high and the "peak" is a fantasy. ``--data zeros`` reproduces that on
+   purpose.
+2. ⚠️  **Never report a cold burst as the peak.** Runtime tracks SM clock nearly
+   1:1, so 30 cold iterations and 1000 sustained ones are different machines. Both
+   are reported, with the clock trace.
 
-1. **Never fill operands with ``torch.empty``/``zeros``.** On CUDA those come back
-   all-zero; almost no bits toggle in the tensor pipes, the part never hits the
-   300 W wall, the SM clock stays ~18 % high, and the measured "peak" is a
-   fantasy. Use ``--data zeros`` to reproduce that failure mode on purpose.
-2. **Never report a cold burst as the peak.** This part's runtime tracks its SM
-   clock nearly 1:1, so 30 cold iterations and 1000 sustained iterations are
-   different machines. Both are reported, always, with the clock trace.
+Usage::
 
-Usage (inside the benchmark container):
-
-    /opt/venv/openpi/bin/python tools/peak_bf16_gemm.py \
-        --sizes 8192,12288,16384 --backends cublas,triton --json out.json
+    python tools/peak_bf16_gemm.py --sizes 8192,12288,16384 --backends cublas,triton --json out.json
 """
 
 from __future__ import annotations

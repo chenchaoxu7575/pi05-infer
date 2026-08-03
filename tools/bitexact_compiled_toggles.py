@@ -11,57 +11,37 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Bit-exactness of the four "verified in eager only" optimizations, ON THE COMPILED PATH.
+r"""Bit-exactness of four structural optimizations on the COMPILED path.
 
-Ledger rows 1 (precomputed adaRMS modulation), 3 (fused QKV), 4 (static prefix-KV buffer)
-and 5 (device-side ``att_masks``) were each verified off-vs-on **in eager, in one process**
-(``adarms_cache_impl/test_*.py``, ``attmask_fix/verify_attmask.py``). None was ever checked
-on the path that actually ships -- ``torch.compile(mode="max-autotune")`` -- and for row 1
-that gap is not cosmetic: the modulation table is built by *eager* ``dense(cond)`` calls
-while the baseline it replaces is inductor's ``triton_per_fused_addmm_0``. Two different
-kernels computing the same GEMM are not obliged to agree in the last bit.
+The precomputed adaRMS table, fused QKV, the static prefix-KV buffer and the
+device-side ``att_masks`` were each verified in eager only. None has an env-var
+kill switch, so this turns each off from the outside by monkeypatching the seam,
+before ``enable_torch_compile`` so inductor traces the right arm:
 
-None of the four has an env-var kill switch (they are structural), so this tool turns each
-one off from the outside, by monkeypatching the seam, and never edits the package:
+  ``adarms``   ``_get_adarms_table`` -> None and ``build_adarms_stack`` -> no-op,
+               so every norm falls back to its own ``dense(cond)``. Killing only
+               the first would land on the stacked GEMM, not the baseline.
+  ``qkv``      ``build_qkv_fused`` -> no-op (three skinny GEMMs).
+  ``kvstatic`` ``prime_kv_static`` -> no-op (re-``cat`` the prefix every step).
+  ``attmask``  rebuild ``att_masks`` the pre-optimization way.
 
-  ``adarms``   ``_get_adarms_table`` -> ``None`` AND ``build_adarms_stack`` -> no-op, so
-               ``sample_mean_var_val`` passes ``adarms_mod=None`` and every norm falls all
-               the way back to its own ``dense(cond)``. Killing only the first would land on
-               the Stage-A stacked GEMM, itself a 2.71e-3 change -- not the baseline.
-  ``qkv``      ``GemmaModel.build_qkv_fused`` -> no-op, so ``qkv_fused_weight`` stays None
-               and ``forward`` takes the three-skinny-GEMM branch.
-  ``kvstatic`` ``GemmaModel.prime_kv_static`` -> no-op, so ``kv_static_k`` stays None and
-               attention re-``torch.cat``s the 968-token prefix on every step.
-  ``attmask``  ``embed_prefix`` rebuilds ``att_masks`` the pre-optimization way,
-               ``torch.tensor(<python list>)[None, :].expand(...)`` (a host->device copy
-               producing a stride-0 view instead of a materialised tensor).
+It prints the structural signature of each arm as evidence that the arms really
+differ, and digests per denoise step so a divergence can be located.
 
-Each patch is applied BEFORE ``enable_torch_compile``, so inductor traces the arm it is
-supposed to trace, and the tool prints the resulting structural signature (fused weight
-present or not, static buffer present or not, table present or not) as the mandatory
-"the arms really are different" evidence (RESULTS_dump_actions_determinism.md §5 step 0).
+``--freeze-prefix FILE`` records the VLM prefix once and replays it, removing the
+SigLIP tower -- the one stage that is not reproducible across processes -- from
+the comparison. Use it for ``adarms`` / ``qkv`` / ``kvstatic``; ``attmask`` lives
+*in* the prefix and must run without it.
 
-``--freeze-prefix FILE`` writes the VLM prefix (pad mask + 18-layer KV) on first use and
-replays it afterwards. That removes the SigLIP vision tower -- the one stage that is *not*
-reproducible across processes -- from the comparison, which is what makes the off-vs-off
-control clean enough for the gate to have any resolving power. Use it for ``adarms`` /
-``qkv`` / ``kvstatic``, which live entirely downstream of the prefix. ``attmask`` is IN the
-prefix, so it must be run without freezing.
-
-Digests are taken per denoise step (``step<i>/x_in``, ``step<i>/mean``) as well as on the
-final actions, so a divergence can be located instead of guessed at.
-
-Usage -- always the control first::
+Usage -- always the control arms first::
 
     D=/tmp/bitexact_backfill/qkv
     for arm in off_a off_b on_a on_b; do
       case $arm in off_*) DIS=qkv ;; on_*) DIS=none ;; esac
-      CUDA_VISIBLE_DEVICES=1 TORCHINDUCTOR_CACHE_DIR=/tmp/ti_bf \\
-        python tools/bitexact_compiled_toggles.py --disable $DIS \\
-          --freeze-prefix /tmp/prefix.pt --out $D/$arm.json
+      TORCHINDUCTOR_CACHE_DIR=/tmp/ti_bf python tools/bitexact_compiled_toggles.py \
+        --disable $DIS --freeze-prefix /tmp/prefix.pt --out $D/$arm.json
     done
-    python tools/bitexact_compiled_toggles.py --verdict $D/off_a.json $D/off_b.json \\
-                                                        $D/on_a.json $D/on_b.json
+    python tools/bitexact_compiled_toggles.py --verdict $D/off_{a,b}.json $D/on_{a,b}.json
 """
 
 from __future__ import annotations

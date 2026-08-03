@@ -1,26 +1,18 @@
 """Byte-level bit-exactness check for the two retiled denoise GEMMs.
 
-``bench/standalone_infer_bench.py --dump-actions`` cannot certify this change:
-MEASURED on RTX PRO 5000, two *identical* runs of the same arm (same code, same
-inductor cache, same seed) already disagree in 300/300 action elements with
-``max|d| = 5.4e-3`` -- larger than the off-vs-on difference. Something upstream
-of the denoise loop (cuBLAS/cuDNN per-process algorithm selection in the SigLIP
-vision tower is the prime suspect) is not reproducible across processes, so the
-end-to-end dump has no resolving power at the bit level.
+Drives the real checkpoint's ``o_proj`` and ``down_proj`` for all 18 expert
+layers through ``torch.compile`` at the production shapes, dtypes and *strides*,
+and prints a sha256 over every output byte.
 
-This tool tests what the change actually touches instead: it drives the real
-checkpoint's ``o_proj`` and ``down_proj`` weights for all 18 expert layers
-through ``torch.compile``, at the production shapes, dtypes and *strides* --
-including the transposed-then-cloned attention output that inductor fuses into
-``triton_tem_fused_clone_mm_8`` -- and prints a sha256 over every output byte.
+``--dump-actions`` cannot do this job: two identical runs of the same arm already
+disagree by ~5e-3 on the actions (per-process kernel selection upstream of the
+denoise loop), which is larger than the effect being tested.
 
-Usage (one process per arm, sharing one inductor cache dir so that the autotune
-result cache pins every untouched decision -- see tools/ab_small_m_mm.sh)::
+Usage -- one process per arm, sharing one inductor cache dir so the autotune
+result cache pins every untouched decision. The two digests must match::
 
     TORCHINDUCTOR_CACHE_DIR=/tmp/ti_be RLINF_SMALL_M_MM=0 python tools/bitexact_denoise_gemms.py
     TORCHINDUCTOR_CACHE_DIR=/tmp/ti_be RLINF_SMALL_M_MM=1 python tools/bitexact_denoise_gemms.py
-
-The two runs must print the same digest.
 """
 
 import argparse
@@ -64,7 +56,7 @@ def main() -> None:
     torch.cuda.set_device(args.device)
 
     from pi05_infer import build_model
-    from pi05_infer.inductor_mm_tiles import (
+    from pi05_infer.patches.inductor_mm_tiles import (
         install_small_m_mm_configs,
         small_m_mm_enabled,
     )

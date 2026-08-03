@@ -1,7 +1,7 @@
 #!/bin/bash
 # ab_prefix_qkv.sh [rounds] [iters] [extra bench args...]
 #
-# Paired A/B of the fused prefix-LM QKV GEMM (pi05_infer/prefix_qkv_fused.py).
+# Paired A/B of the fused prefix-LM QKV GEMM (pi05_infer/patches/prefix_qkv_fused.py).
 #
 #   arm "off" : RLINF_FUSE_PREFIX_QKV=0  -- three GEMMs per layer, q(2048)/k(256)/v(256)
 #   arm "on"  : RLINF_FUSE_PREFIX_QKV=1  -- one [2560, 2048] GEMM per layer, 17 of 18

@@ -1,7 +1,7 @@
 #!/bin/bash
 # ab_skip_last_lm_layer.sh [rounds] [iters] [extra bench args...]
 #
-# Paired A/B of the prefix-LM last-layer skip (pi05_infer/prefix_last_layer.py).
+# Paired A/B of the prefix-LM last-layer skip (pi05_infer/patches/prefix_last_layer.py).
 #
 #   arm "off" : RLINF_SKIP_LAST_LM_LAYER=0  -- full 18th decoder layer
 #   arm "on"  : RLINF_SKIP_LAST_LM_LAYER=1  -- layer 17 reduced to input_layernorm

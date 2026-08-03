@@ -11,32 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Why the precomputed adaRMS table stops being bit-exact once you compile.
+r"""Do eager ``dense(cond)`` and inductor's compiled ``addmm`` agree on this shape?
 
-``tools/bitexact_compiled_toggles.py --disable adarms`` shows the table arm and the
-per-dense arm diverging at ``step0/mean`` under ``max-autotune`` while agreeing exactly in
-eager. The mechanism that would explain that is:
+``bitexact_compiled_toggles.py --disable adarms`` shows the table arm and the
+per-dense arm diverging under ``max-autotune`` while agreeing in eager. The
+candidate mechanism: the table is built by *eager* ``dense(cond)`` calls outside
+every compiled region, while the baseline computes the same projection *inside*
+the compiled expert, where inductor emits a fused Triton kernel.
 
-    the table is built by **eager** ``dense(cond)`` calls (``_compute_adarms_table`` runs
-    outside every compiled region), while the baseline computes the same projection
-    **inside** the compiled expert, where inductor emits it as a fused Triton kernel.
-
-That hypothesis is only worth writing down if the two kernels actually disagree on this
-shape, so this measures exactly that, on the real ``dense`` weights of all 37 adaRMS norms
-and on the real ``cond`` vector that ``embed_suffix`` produces for denoise step 0:
-
-    eager  ``n.dense(cond)``                       (what fills the table)
-    vs
-    compiled ``F.linear(cond, W, b)``              (inductor's addmm on the same shape)
-
-A difference here is a *sufficient* explanation. No difference would falsify the hypothesis
-and the FAIL would then be unexplained -- which is the outcome that must be reported as
-such rather than papered over.
+This measures exactly that, on the real ``dense`` weights of all 37 adaRMS norms
+and the real ``cond`` for denoise step 0. A difference is a sufficient
+explanation; no difference falsifies the hypothesis and leaves the FAIL
+unexplained -- which must then be reported as unexplained.
 
 Usage::
 
-    CUDA_VISIBLE_DEVICES=1 TORCHINDUCTOR_CACHE_DIR=/tmp/ti_bf \\
-      /opt/venv/openpi/bin/python tools/bitexact_adarms_dense.py --out /tmp/dense.json
+    TORCHINDUCTOR_CACHE_DIR=/tmp/ti_bf python tools/bitexact_adarms_dense.py --out /tmp/dense.json
 """
 
 from __future__ import annotations

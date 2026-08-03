@@ -141,7 +141,7 @@ OFF 臂走的是被验证过的降级路径。
 在实际发布用的 `max-autotune` 下并不 —— 而 `max-autotune` 自己的 kernel 选择在冷 autotune
 之间就不稳定:在某个 shape 上,4 次冷缓存里有 1 次选了 cuBLAS 而不是 Triton 模板,
 两者 digest 不同。**对每一项都无条件成立的说法是:变换是代数等价的。**
-细节见 `pi05_infer/inductor_mm_tiles.py` 里的 bit-exactness 说明 ——
+细节见 `pi05_infer/patches/inductor_mm_tiles.py` 里的 bit-exactness 说明 ——
 那里记录了一条本项目**曾经相信、已经发布、后来被实测推翻**的规则。
 
 <a id="r-layout"></a>
@@ -149,8 +149,10 @@ OFF 臂走的是被验证过的降级路径。
 ## 仓库结构
 
 ```
-pi05_infer/    引擎本体(engine.py、vendoring 的动作专家 Gemma + Triton 融合核、
-               prefix_last_layer.py、prefix_qkv_fused.py、inductor_mm_tiles.py)
+pi05_infer/    引擎本体
+  gemma/       vendoring 并改过的动作专家 Gemma + Triton 融合核
+  patches/     打在"我们不拥有的代码"上的优化(stock transformers 的 prefix、
+               inductor 的 tile 候选)—— 全部可关
 bench/         standalone_infer_bench.py —— 延迟基准
 tools/         验证 gate 与测量驱动 —— 见 tools/README.md
 docs/          上面那些图,以及重新生成它们的 make_charts.py

@@ -11,41 +11,28 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Does batching the three camera views into ONE SigLIP call change the numbers?
+r"""Does batching the three camera views into ONE SigLIP call change the numbers?
 
-``embed_prefix`` (``pi05_infer/openpi_patched/pi0_pytorch.py``) runs the vision tower
-once over ``torch.cat(images, dim=0)`` instead of once per view. The historical record
-(``HANDOFF_min_infer_repro.md:11``) reports "action max diff 4.9e-3" for this change and
-attributes it to "cuBLAS kernel-selection noise" -- but 4.9e-3 is the same order as the
-*end-to-end gate's own* cross-process noise floor (2.5-5.4e-3), and that noise floor also
-lives in the SigLIP tower, so the end-to-end number cannot separate the two.
+``embed_prefix`` runs the vision tower once over ``cat(images)`` instead of once
+per view. The historical end-to-end number for this change (4.9e-3) is the same
+order as the gate's own cross-process noise floor, and that noise lives in the
+SigLIP tower too -- so the end-to-end number cannot separate the two.
 
-This tool settles it **inside one process**, at the tensor the change actually produces:
+This settles it inside one process, at three levels: ``VIEW`` (the batched
+``embed_image`` sliced back per view vs the per-view loop -- the whole change,
+one call apart), ``KV`` (the same question propagated to the 18-layer KV cache,
+which is all ``sample_actions`` consumes from the prefix), and ``ACT`` as a
+cross-check. Each arm runs twice as an in-process control: arm-vs-itself not
+bit-identical yields INCONCLUSIVE, never PASS.
 
-* ``VIEW`` -- ``embed_image(cat(v0,v1,v2))`` sliced back per view, vs
-  ``[embed_image(v) for v in views]``. This is the whole change, one call apart.
-* ``KV``   -- the same question propagated through the full prefix: the 18-layer
-  PaliGemma KV cache is the ONLY thing ``sample_actions`` consumes from the prefix.
-* ``ACT``  -- the [1, 50, 6] actions, as a cross-check only.
+⚠️  Batching is a mathematical identity (SigLIP attention never crosses the batch
+dim) but not automatically a bit-level one: the GEMMs go M=256 -> 768, so
+cuBLAS/inductor may pick different tiles and reduction splits. A nonzero result
+means "a different but equally valid summation order", not "wrong".
 
-Both arms run in the same process against the same weights, so cross-process autotune
-drift (RESULTS_dump_actions_determinism.md) cannot reach the comparison. Each arm is
-additionally run twice, giving an **in-process control**: if arm-vs-itself is not
-bit-identical the tool prints INCONCLUSIVE and never PASS.
+Usage::
 
-Prior expectation, before measuring: LayerNorm, GELU and the residual adds are per-sample
-ops and SigLIP attention never crosses the batch dimension, so batching is *mathematically*
-an identity. It is not automatically a *bit-level* identity: the GEMMs go from M=256 to
-M=768 and the LayerNorm reductions from xnumel=256 to xnumel=768, so cuBLAS/inductor are
-free to pick different tile shapes, split-k and reduction splits, each of which reorders
-fp32 accumulation. So a nonzero result here means "the batched path is a different but
-equally valid summation order", not "the batched path is wrong" -- and a zero result
-means the two happened to land on the same order.
-
-Usage (one process, both arms)::
-
-    CUDA_VISIBLE_DEVICES=1 TORCHINDUCTOR_CACHE_DIR=/tmp/ti_siglip \\
-      /opt/venv/openpi/bin/python tools/bitexact_siglip_batch.py --out /tmp/siglip.json
+    TORCHINDUCTOR_CACHE_DIR=/tmp/ti_siglip python tools/bitexact_siglip_batch.py --out /tmp/siglip.json
     ... --no-compile     # eager, for the mathematical-identity question alone
 """
 

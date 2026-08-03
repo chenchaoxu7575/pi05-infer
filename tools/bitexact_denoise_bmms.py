@@ -1,34 +1,20 @@
 """Byte-level bit-exactness check for the retiled denoise attention BMMs.
 
-Companion to ``tools/bitexact_denoise_gemms.py``, which covers the two weight
-projections; this one covers the two batched attention GEMMs that
-``install_small_m_bmm_configs`` widens the autotune space for::
+Companion to ``bitexact_denoise_gemms.py``, covering the two batched attention
+GEMMs that ``install_small_m_bmm_configs`` touches::
 
-    Q.K^T   bmm(8x50x256 , 8x256x1018)   -> triton_tem_fused_bmm_5
-    P.V     bmm(8x50x1018, 8x1018x256)   -> triton_tem_fused_bmm_7
+    Q.K^T   bmm(8x50x256 , 8x256x1018)
+    P.V     bmm(8x50x1018, 8x1018x256)
 
-Those exact shapes are what inductor reports for the production graph (see the
-``AUTOTUNE bmm(...)`` lines in any ``max-autotune`` bench log): 8 query heads,
-``action_chunk`` = 50 rows, head_dim 256, and 968 prefix + 50 suffix = 1018 KV
-positions. Unlike the projections these GEMMs have no weights -- both operands
-are activations -- so the inputs are generated, but they are generated in the
-*shape the model produces*: one KV head broadcast to 8 query heads via
-``repeat_kv`` (so the second operand keeps batch stride 0, as in production),
-and the P matrix is a real softmax output rather than raw noise, because the
-value distribution is what decides the rounding.
+Both operands are activations, so the inputs are generated -- but in the shape
+the model produces: one KV head broadcast to 8 query heads (second operand batch
+stride 0), and P a real softmax output, since the value distribution decides the
+rounding.
 
-Why not ``--dump-actions``: two identical runs of the same arm already disagree
-by ~5e-3 on the actions (per-process autotune of the SigLIP LayerNorm
-reductions), so the end-to-end dump has no resolving power at the bit level.
-See the internal dump-actions determinism study.
-
-Usage (one process per arm, sharing one inductor cache dir so the autotune
-result cache pins every untouched decision)::
+Usage -- one process per arm, sharing one inductor cache dir. Digests must match::
 
     TORCHINDUCTOR_CACHE_DIR=/tmp/ti_be RLINF_SMALL_M_BMM=0 python tools/bitexact_denoise_bmms.py
     TORCHINDUCTOR_CACHE_DIR=/tmp/ti_be RLINF_SMALL_M_BMM=1 python tools/bitexact_denoise_bmms.py
-
-The two runs must print the same digest.
 """
 
 import argparse
@@ -73,7 +59,7 @@ def main() -> None:
     assert torch.cuda.is_available(), "CUDA device required for this check."
     torch.cuda.set_device(args.device)
 
-    from pi05_infer.inductor_mm_tiles import (
+    from pi05_infer.patches.inductor_mm_tiles import (
         install_small_m_bmm_configs,
         small_m_bmm_enabled,
     )

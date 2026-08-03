@@ -11,37 +11,27 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Where does a ``--dump-actions`` run stop being reproducible across processes?
+r"""Where does a ``--dump-actions`` run stop being reproducible across processes?
 
-``bench/standalone_infer_bench.py --dump-actions`` is the end-to-end bit-exactness
-gate, but it only compares the final ``[1, 50, 6]`` action tensor: when two runs of
-the *same* arm disagree there is no way to tell whether the divergence entered in
-the SigLIP/PaliGemma prefix, in the flow-matching noise draw, or inside the denoise
-loop.
-
-This probe runs exactly the seeded call the bench dumps, but takes a sha256 of every
-intermediate on the way:
+The end-to-end gate compares only the final actions, so when two runs of the same
+arm disagree there is no way to tell whether it entered in the prefix, the noise
+draw, or the denoise loop. This runs the same seeded call and digests every
+intermediate::
 
     obs/images, obs/state      the preprocessed model inputs (must never move)
-    noise                      the initial flow-matching noise draw (RNG check)
+    noise                      the initial flow-matching noise draw
     prefix/out, prefix/kv      the VLM prefix and its KV cache
     step<i>/x_in, step<i>/mean per denoise step
     actions                    what --dump-actions writes
 
-Run it N times with identical arguments and diff the JSON: the first stage whose
-digest is not constant across runs is where the nondeterminism lives.
+Run N times and diff the JSON: the first stage whose digest is not constant is
+where the nondeterminism lives. It also fingerprints inductor's runtime autotune
+winners, so "the winners moved" and "the numbers moved" can be correlated.
 
-It also fingerprints inductor's *runtime* Triton autotune winners (the
-``*.best_config`` files in ``TORCHINDUCTOR_CACHE_DIR``) so that "the winners moved"
-and "the numbers moved" can be correlated instead of guessed at.
+Usage::
 
-Usage (inside the benchmark container)::
-
-    TORCHINDUCTOR_CACHE_DIR=/tmp/ti_probe \\
-    /opt/venv/openpi/bin/python tools/determinism_probe.py --out /tmp/probe_r1.json
-
-    # compare a set of runs
-    /opt/venv/openpi/bin/python tools/determinism_probe.py --compare /tmp/probe_r*.json
+    python tools/determinism_probe.py --out /tmp/probe_r1.json
+    python tools/determinism_probe.py --compare /tmp/probe_r*.json
 """
 
 import argparse

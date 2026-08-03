@@ -1,7 +1,7 @@
 #!/bin/bash
 # ab_small_m_mm.sh [rounds] [iters] [extra bench args...]
 #
-# Paired A/B of the small-M mm tile candidates (pi05_infer/inductor_mm_tiles.py).
+# Paired A/B of the small-M mm tile candidates (pi05_infer/patches/inductor_mm_tiles.py).
 #
 #   arm "off" : RLINF_SMALL_M_MM=0  -- stock inductor mm autotune space
 #   arm "on"  : RLINF_SMALL_M_MM=1  -- + BLOCK_M in {16,32} / BLOCK_K=128 candidates

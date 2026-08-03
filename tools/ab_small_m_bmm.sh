@@ -2,7 +2,7 @@
 # ab_small_m_bmm.sh [rounds] [iters] [extra bench args...]
 #
 # Paired A/B of the extra tile candidate for the P.V attention BMM
-# (pi05_infer/inductor_mm_tiles.py::install_small_m_bmm_configs).
+# (pi05_infer/patches/inductor_mm_tiles.py::install_small_m_bmm_configs).
 #
 #   arm "off" : $AB_VAR=0        arm "on" : $AB_VAR=1
 #

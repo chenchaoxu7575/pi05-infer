@@ -1,26 +1,18 @@
-"""Byte-level check that skipping the prefix LM's last layer leaves the KV cache alone.
+r"""Byte-level check that skipping the prefix LM's last layer leaves the KV cache alone.
 
-The KV cache is the *only* thing ``sample_actions`` consumes from the prefix LM, so
+The KV cache is the only thing ``sample_actions`` consumes from the prefix LM, so
 "the cache is bit-identical" is the whole correctness argument for
-``pi05_infer/prefix_last_layer.py`` -- stronger and far more direct than an
-end-to-end action dump (``--dump-actions`` is not reproducible across processes in
-max-autotune mode: two identical runs of the same arm already disagree by 5.4e-3,
-see tools/bitexact_denoise_gemms.py).
+``pi05_infer/patches/prefix_last_layer.py``. Runs the real checkpoint through the real
+``_build_prefix_cache`` and prints a sha256 over all 18 layers' K and V.
 
-This runs the real checkpoint through the real ``_build_prefix_cache`` and prints a
-sha256 over every byte of all 18 layers' K and V.
-
-Usage -- one process per arm, sharing one inductor cache dir so that the autotune
-result cache pins every untouched decision::
+Usage -- one process per arm, sharing one inductor cache dir. Run the off-vs-off
+control first, then off vs on::
 
     TORCHINDUCTOR_CACHE_DIR=/tmp/ti_kv RLINF_SKIP_LAST_LM_LAYER=0 \
-        python tools/bitexact_prefix_kv.py --out off.json
+      python tools/bitexact_prefix_kv.py --out off.json
     TORCHINDUCTOR_CACHE_DIR=/tmp/ti_kv RLINF_SKIP_LAST_LM_LAYER=1 \
-        python tools/bitexact_prefix_kv.py --out on.json
-
-Always run an off-vs-off control first; only then compare off vs on. Compare with::
-
-    python tools/bitexact_prefix_kv.py --compare a.json b.json
+      python tools/bitexact_prefix_kv.py --out on.json
+    python tools/bitexact_prefix_kv.py --compare off.json on.json
 """
 
 import argparse
@@ -175,7 +167,7 @@ def main() -> int:
     from standalone_infer_bench import make_env_obs
 
     from pi05_infer import build_model
-    from pi05_infer.prefix_last_layer import ENV_VAR, skip_enabled
+    from pi05_infer.patches.prefix_last_layer import ENV_VAR, skip_enabled
 
     model = build_model(
         model_path=args.model_path,
@@ -258,7 +250,7 @@ def main() -> int:
 
     result = {
         "skip_installed": installed,
-        # How many prefix layers got the fused q/k/v GEMM (pi05_infer/prefix_qkv_fused.py).
+        # How many prefix layers got the fused q/k/v GEMM (pi05_infer/patches/prefix_qkv_fused.py).
         # Recorded so the digest file says which arm produced it.
         "prefix_qkv_fused_layers": getattr(model, "_prefix_qkv_fused_layers", 0),
         "prefix_embs": embs_digest,

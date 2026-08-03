@@ -11,31 +11,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Per-denoise-step GPU idle, measured on the kernel timeline.
+r"""Per-denoise-step GPU idle, measured on the kernel timeline.
 
-Method (kept identical across builds so the numbers stay comparable):
+Method, kept identical across builds so the numbers stay comparable:
 
-  * **Anchor** on a kernel that fires exactly once per expert layer per denoise
-    step. ``_qkv_rope_kernel`` (the fused QKV+RoPE Triton kernel) fires 18x/step,
-    one per gemma-expert layer. Anchoring by *name* rather than by stream is what
-    makes the measurement survive Stage 1: the hand-captured graph moves the
-    denoise kernels onto a different stream, but the kernel names do not change.
-  * **Step boundary** = consecutive step starts, i.e. every 18th anchor kernel.
-    A step whose successor is more than 5 ms away is the last step of a predict;
-    its "wall" would swallow the next prefix phase, so it is dropped.
-  * **Idle** = step wall clock minus the union of *all* kernel intervals (any
-    stream) clipped to that step's window. Union, not sum, so concurrent kernels
-    are not double counted.
+* **Anchor** on ``_qkv_rope_kernel``, which fires 18x/step, one per expert layer.
+  Anchoring by *name* rather than stream is what makes this survive Stage 1: the
+  captured graph moves the denoise kernels to another stream, names do not change.
+* **Step boundary** = every 18th anchor. A step whose successor is >5 ms away is a
+  predict's last step and is dropped, or its wall would swallow the next prefix.
+* **Idle** = step wall minus the *union* of all kernel intervals clipped to the
+  window. Union, not sum, so concurrent kernels are not double counted.
 
-Usage:
+⚠️  The Stage-1 on/off signal is the count of ``denoise/expert_forward`` NVTX
+ranges per predict (10 = eager per step, 0 = inside the captured graph), also
+reported. Do NOT use a non-null ``graphNodeId`` -- inductor's max-autotune emits
+its own cudagraphs, so those kernels are graph nodes with Stage 1 off too.
+
+Usage::
+
     step_idle.py <sqlite> [<sqlite> ...] [--anchor NAME] [--per-step N]
-
-Discriminator note: this tool also reports the number of ``denoise/expert_forward``
-NVTX ranges per predict, which is the reliable Stage-1 on/off signal. 10 per predict
-means the step body is dispatched eagerly once per step; 0 means the body is inside
-the hand-captured graph and only ran during capture. Do *not* use a non-null
-``graphNodeId`` on the denoise kernels as the signal -- inductor's ``max-autotune``
-emits its own cudagraphs, so those kernels are graph nodes even with Stage 1 off.
 """
 
 import bisect

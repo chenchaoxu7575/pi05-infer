@@ -157,7 +157,7 @@ are bit-identical under eager but not under the shipping `max-autotune`, whose o
 choice is not stable across cold autotunes — on one shape, 1 of 4 cold caches picked cuBLAS
 over the Triton template, which has a different digest. What holds for every item without
 qualification is that the transform is algebraically equivalent. See the bit-exactness note
-in `pi05_infer/inductor_mm_tiles.py`, which documents a rule this project believed, shipped,
+in `pi05_infer/patches/inductor_mm_tiles.py`, which documents a rule this project believed, shipped,
 and then measured to be false.
 
 <a id="r-layout"></a>
@@ -165,8 +165,10 @@ and then measured to be false.
 ## Repository layout
 
 ```
-pi05_infer/    the engine (engine.py, the vendored action-expert Gemma + Triton fusion
-               kernels, prefix_last_layer.py, prefix_qkv_fused.py, inductor_mm_tiles.py)
+pi05_infer/    the engine
+  gemma/       the vendored, modified action-expert Gemma + Triton fusion kernels
+  patches/     optimizations applied to code we do not own (the stock-transformers
+               prefix, and inductor's tile candidates) -- all opt-out
 bench/         standalone_infer_bench.py -- latency bench
 tools/         verification gates and measurement drivers -- see tools/README.md
 docs/          the charts above, and make_charts.py which regenerates them

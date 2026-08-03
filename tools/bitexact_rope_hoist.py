@@ -11,31 +11,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Kernel-level bit-exactness gate for the hoisted denoise step invariants.
+r"""Kernel-level bit-exactness gate for the hoisted denoise step invariants.
 
-``RLINF_HOIST_STEP_INVARIANTS=1`` moves three tensors out of the denoise loop:
+``RLINF_HOIST_STEP_INVARIANTS=1`` moves ``position_ids``, the 4-D attention mask
+and the rotary ``cos``/``sin`` out of the loop. The first two are integer/bool
+arithmetic and exact by construction. The rotary table is the one that matters:
+with the hoist off inductor produces it *inside* the compiled expert graph, with
+it on it is produced eagerly and handed in -- a compilation boundary, and the only
+place the two arms can disagree in the last bit.
 
-* ``position_ids`` and the 4-D attention mask -- built by the *same* eager ops as before,
-  just once per predict instead of once per Euler step. Integer / bool / ``torch.where``
-  arithmetic, so equality is exact by construction; checked here anyway.
-* the rotary ``cos``/``sin`` table -- this one moves *across a compilation boundary*. With
-  the hoist off it is produced by inductor inside the compiled expert graph
-  (``triton_poi_fused__to_copy_add_cos_mean_mul_pow_rsqrt_sin_*``); with it on it is
-  produced eagerly and handed to the graph as an input. That is the only place where the
-  two arms can disagree in the last bit, so it is the thing worth gating.
+So this compares, at the real shapes and position_ids, eager
+``rotary_emb(probe, position_ids)`` against the same thing under the mode the
+denoise expert is compiled with. Unlike an end-to-end action diff it is not
+confounded by per-process autotune drift.
 
-The gate therefore compares, at the real shapes and on the real ``position_ids``:
+Usage::
 
-    eager  rotary_emb(probe, position_ids)      (what the hoist computes)
-    vs
-    torch.compile(rotary_emb, mode=<the mode the denoise expert is compiled with>)
-
-A bitwise match means every downstream denoise kernel sees byte-identical cos/sin, which
-is the strongest evidence available without re-running the whole model -- and unlike an
-end-to-end action diff it is not confounded by per-process autotune drift.
-
-Usage:
-    /opt/venv/openpi/bin/python tools/bitexact_rope_hoist.py [--prefix-len 968]
+    python tools/bitexact_rope_hoist.py [--prefix-len 968]
 """
 
 import argparse

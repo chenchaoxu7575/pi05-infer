@@ -1,38 +1,26 @@
 """Fused Triton kernels for the pi0.5 action-expert denoise loop.
 
-Two matmul-**epilogue** fusions, each behind a ``torch.library`` custom op with a
+Two matmul-epilogue fusions, each a ``torch.library`` custom op with a
 plain-PyTorch fallback:
 
-1. ``fused_gate_up_geglu`` -- ``gelu_tanh(x @ Wg.T) * (x @ Wu.T)`` in one kernel
-   (two accumulators over one shared A tile).
-2. ``fused_qkv_rope`` -- ``rope(x @ Wqkv.T)`` in one kernel, writing q into a
-   ``[B, M, Hq, D]`` buffer and k/v straight into the static KV cache tails.
+1. ``fused_gate_up_geglu`` -- ``gelu_tanh(x @ Wg.T) * (x @ Wu.T)``, two
+   accumulators over one shared A tile.
+2. ``fused_qkv_rope`` -- ``rope(x @ Wqkv.T)``, writing q to a ``[B, M, Hq, D]``
+   buffer and k/v straight into the static KV cache tails.
 
-**Bit-exactness.** Both kernels deliberately round each accumulator that the
-unfused pipeline would have *stored as bf16* back through bf16 before the
-elementwise epilogue (``acc.to(bf16).to(fp32)``), reproducing the two-kernel
-path's rounding exactly.  This holds only while the GEMM tiling matches the one
-it was verified against.
+Both round each accumulator through bf16 before the epilogue, matching the
+unfused two-kernel path bit for bit.  That holds only for the tiling it was
+verified against: re-run ``tools/bitgate.py`` after changing any tile parameter,
+including ``BLOCK_M``/``BLOCK_N`` (which parameters perturb the fp32 reduction
+order is shape-dependent -- see :mod:`pi05_infer.patches.inductor_mm_tiles`).
 
-⚠️  ``BLOCK_K`` is pinned here to the value inductor's template picked, and
-``BLOCK_M``/``BLOCK_N`` are treated as free knobs.  That split is a convention,
-**not a proof**: which tile parameters perturb the fp32 reduction order depends on
-the shape and has to be measured -- see the bit-exactness note in
-``pi05_infer/inductor_mm_tiles.py``, where the same assumption was shipped and
-then refuted.  Re-run ``tools/bitgate.py`` after changing any of them.
+Ops register under ``pi05_infer::``, not ``rlinf::``: the namespace is
+process-global, and an older copy of this file inside ``transformers`` would
+collide and silently disable one side's fusions.
 
-Precision is unchanged everywhere: bf16 operands, fp32 accumulate, bf16 store.
-
-**Op namespace.** The ops register as ``pi05_infer::*``, not ``rlinf::*``.
-``torch.library`` namespaces are process-global, so if a container still carries
-an older copy of this file inside ``transformers/models/gemma/`` (imported by the
-PaliGemma prefix), registering under ``rlinf::`` twice would raise and silently
-disable the fusions in whichever copy lost the race.
-
-Kill switches: ``RLINF_FUSE_GEGLU``, ``RLINF_FUSE_QKV_ROPE`` (set to 0 for the
-eager fallback).  Tuning: ``RLINF_FUSE_GEGLU_CFG`` / ``RLINF_FUSE_QKV_CFG`` =
-``"BM,BN,BK,warps,stages"``.  The ``RLINF_FUSE_SWIGLU*`` spellings are honoured as
-aliases; GeGLU is the correct name for ``gelu_tanh(gate) * up``.
+Kill switches ``RLINF_FUSE_GEGLU`` / ``RLINF_FUSE_QKV_ROPE``; tile overrides
+``RLINF_FUSE_GEGLU_CFG`` / ``RLINF_FUSE_QKV_CFG`` = ``"BM,BN,BK,warps,stages"``.
+``RLINF_FUSE_SWIGLU*`` are accepted as aliases.
 """
 
 import os
@@ -104,14 +92,8 @@ _GEGLU_CFG = _env_cfg(
 )
 _QKV_CFG = _env_cfg("RLINF_FUSE_QKV_CFG", (64, 16, 128, 4, 4))
 
-# The GeGLU fusion only pays off in the short-sequence (decode / denoise-suffix)
-# regime it is tuned for: there the gate activation round-trip through HBM and the
-# extra launch dominate. On a long prefix (M in the hundreds) that cost is
-# amortised, the GEMM becomes compute-bound, and a single hand-fixed tile config
-# loses to inductor's per-shape autotuned template. MEASURED: without this guard
-# the fusion also fired on PaliGemma's 968-token prefix LM (which is a Gemma too)
-# and cost +6.5 ms/predict there -- 5x more than the whole denoise-side win.
-# Default = one M-tile, i.e. exactly the regime the kernel was written for.
+# Only fire in the short-sequence regime the tile config is tuned for. Without
+# this the fusion also caught PaliGemma's 968-token prefix and cost +6.5 ms/predict.
 _GEGLU_MAX_M = _env_int(
     "RLINF_FUSE_GEGLU_MAX_M", _GEGLU_CFG[0], legacy="RLINF_FUSE_SWIGLU_MAX_M"
 )

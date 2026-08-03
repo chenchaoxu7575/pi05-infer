@@ -11,27 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""NVTX-attributed, per-stream kernel census for an nsys-2026 sqlite export.
+r"""NVTX-attributed, per-stream kernel census for an nsys-2026 sqlite export.
 
-``stream_summary.py`` splits by CUDA stream; that is enough to keep a prefix
-regression from hiding behind a denoise metric, but it cannot say whether a
-kernel belongs to the SigLIP tower or to the Gemma-2B prefill -- both run on the
-same stream. This tool attributes every kernel to the innermost enclosing NVTX
-range by going through the launch site:
+``stream_summary.py`` splits by stream, which cannot say whether a kernel belongs
+to the SigLIP tower or the Gemma-2B prefill -- both run on the same one. This
+attributes each kernel to the innermost enclosing NVTX range via its launch site
+(``correlationId`` -> the ``cudaLaunchKernel`` -> the range open on that thread),
+which is exact; comparing GPU timestamps against CPU ranges is not, because
+kernels routinely finish after their range has closed.
 
-    kernel.correlationId -> CUPTI_ACTIVITY_KIND_RUNTIME (the cudaLaunchKernel,
-    on the CPU, with a globalTid) -> innermost NVTX range open on that thread
+⚠️  Kernels launched from a captured graph replay carry the correlation of the
+replay call, so everything inside the Stage-1 denoise graph is attributed to
+whatever range wraps ``graph.replay()``. Correct for the prefix, which is never
+captured; the denoise rows are graph-granular.
 
-which is exact, unlike comparing GPU timestamps against CPU NVTX ranges (kernels
-run asynchronously and routinely finish long after their range has closed).
+Usage::
 
-Caveat, stated because it changes how the numbers must be read: kernels launched
-from inside a *captured CUDA graph* replay carry the correlation of the replay
-call, so everything inside the Stage-1 denoise graph is attributed to whichever
-range wraps ``graph.replay()``. That is correct for the prefix -- the prefix is
-never captured -- but it means the denoise rows are graph-granular.
-
-Usage:
     prefix_census.py <sqlite> <n_predicts> [--phase prefix/vlm_forward] [--csv out.csv]
 """
 

@@ -1,31 +1,14 @@
 #!/usr/bin/env python3
 """Regenerate the three README charts (light + dark PNG for each).
 
-    python docs/make_charts.py [--sqlite <stage1_on.sqlite> --sqlite-off <stage1_off.sqlite>]
+    python docs/make_charts.py [--sqlite <on.sqlite> --sqlite-off <off.sqlite>]
 
-Every number plotted here is a measurement, and every measurement has a source:
+Chart 1's ledger rows are hard-coded because paired A/B runs cannot be replayed
+from a profile; each row carries the note it came from. Charts 2 and 3 come from
+nsys sqlite exports and can be re-derived with ``--sqlite``, which prints what it
+derived so it can be diffed against the constants below.
 
-* the **e2e ledger** (chart 1) is a chain of paired plain-wall-clock A/Bs, one
-  per optimization, each recorded in its own results note.  It is hard-coded
-  below with the note it came from, because those runs cannot be replayed from
-  a profile.  It has three panels, deliberately kept apart because they use
-  three different rulers: the *prehistory* (older runs on a different
-  measurement harness), the paired e2e ledger, and the same rows counted as
-  GPU busy per denoise step.
-* the **denoise kernel breakdown** (chart 2) and the **phase split** (chart 3)
-  are derived from nsys 2026.1.2 sqlite exports.  Pass ``--sqlite`` /
-  ``--sqlite-off`` to re-derive them instead of using the recorded values; the
-  script prints what it derived so it can be diffed against the constants.
-
-Every hard-coded constant below names the internal document it came from. Those
-notes are not published yet (see README.md), so the names are provenance, not
-links -- but the constants they justify are all reproducible from the profiles
-via ``--sqlite`` / ``--sqlite-off``.
-
-Design follows a validated categorical palette (blue / orange / aqua) that
-passes CVD separation, normal-vision separation and lightness-band checks in
-both light and dark mode.  The light-mode aqua sits below 3:1 against the light
-surface, so every aqua mark carries a visible direct label.
+⚠️  Chart 1's three panels use three different rulers and must not be chained.
 """
 
 from __future__ import annotations
@@ -107,22 +90,13 @@ _KAPPA = 0.5522847498307936  # circle -> cubic-Bezier control-point ratio
 def _rounded_hbar(ax, y, x0, x1, height, color, radius_pt=4.0, zorder=3):
     """Horizontal bar with ~4pt-rounded ends, drawn in data coordinates.
 
-    matplotlib has no rounded bars.  The obvious construction -- a
-    ``FancyBboxPatch`` with ``boxstyle="Round"`` and ``mutation_aspect``
-    carrying the x->y scale ratio -- is *not* usable here: ``mutation_aspect``
-    divides the box height, runs the corner rounding, then scales back, so at
-    the aspect ratios these charts use (chart 2 is ~0.038 data units of y per
-    data unit of x) the intermediate box degenerates and the patch renders at
-    full row height, one solid band per bar.  Chart 1 (aspect ~1.4) survives
-    it, which is why only chart 2 ever looked broken.
+    matplotlib has no rounded bars, and ``FancyBboxPatch`` + ``mutation_aspect``
+    degenerates at the aspect ratios these charts use. So the path is built
+    explicitly, with the point->data conversion done per axis so the arcs are
+    round on screen.
 
-    So the path is built explicitly instead: a rectangle whose four corners are
-    circular arcs of ``radius_pt`` points, with the point->data conversion done
-    separately per axis so the arcs are round *on screen*.  No mutation, no
-    aspect handling, identical output on any matplotlib version.
-
-    Call it only after the axes limits and the subplot geometry are final --
-    the conversion reads ``ax.get_window_extent()``.
+    ⚠️  Call only after the axes limits and subplot geometry are final -- the
+    conversion reads ``ax.get_window_extent()``.
     """
     fig = ax.figure
     bbox = ax.get_window_extent()
@@ -173,17 +147,11 @@ def _rounded_hbar(ax, y, x0, x1, height, color, radius_pt=4.0, zorder=3):
 # --------------------------------------------------------------------------
 # Chart 1 - the optimization ledger (three stacked panels)
 # --------------------------------------------------------------------------
-# Naming convention for every row in this file: **verb + object**, describing
-# what the change does, never the internal codename.  The codenames that do
-# appear in the source tree (the E-series run ids, "Stage-1", the env-var
-# switches) are mapped to these names in the README's naming table, so the
-# chart stays readable to someone who has never seen this project while the
-# switches stay greppable.
+# Rows are named verb + object, never by internal codename.
 #
-# --- panel 2: the paired ledger -------------------------------------------
-# e2e = predict_action_batch, plain CPU wall clock, 30 iters after 8 warmups,
-# serialized, single job on the box.  RTX PRO 5000 (GB202/sm_120), 300 W cap.
-# pi0.5, bs=1, K=10 Euler steps, 968 prefix tokens, action chunk 50, bf16.
+# --- panel 2: the paired ledger. e2e = predict_action_batch, plain CPU wall
+# clock, 30 iters after 8 warmups, serialized. RTX PRO 5000, 300 W cap, bs=1,
+# K=10 Euler steps, 968 prefix tokens, chunk 50, bf16.
 #
 # (label, e2e_after_ms, delta_ms, source note)
 LEDGER = [
@@ -207,28 +175,13 @@ LEDGER = [
      "20260728_adarms_cond/ab_summary.txt (paired 43.20 -> 42.90, sd 0.07, n=4)"),
 ]
 
-# --- panel 1: prehistory, the runs that came *before* the ledger -----------
-# ALL of these were taken on a DIFFERENT measurement harness: the full RLinf
-# Ray + EnvWorker training path with nsys attached, on a different box
-# (a 4x RTX PRO 5000 box), 2026-07-03, nsys 2025.3.1.  e2e there is "the sum of
-# the per-phase CPU wall clocks under nsys" (per the sm_120 profile notes), NOT
-# the plain standalone wall clock the ledger uses.
+# --- panel 1: prehistory, on a DIFFERENT harness -- the full RLinf Ray +
+# EnvWorker path under nsys, on another box, where e2e means "sum of the
+# per-phase CPU wall clocks under nsys". Same compile config on both sides.
 #
-# The step from 58.9 to the 52.60 ledger baseline is therefore NOT an
-# optimization.  It is explicitly documented as a change of ruler:
-#   optimization log: "纯推理基线(同上配置) | 53.1 ms |
-#       换测法:去掉 Ray/worker 口径约 6ms | 纯推理"
-#   optimization log: "两种测法别相减 ... 两者差约 6ms 是测法口径,不是优化"
-#       ("do not subtract the two rulers ... the ~6 ms difference is
-#        measurement scope, not an optimization")
-#   minimal-repro handoff: "58.9 是 full-worker + nsys 口径"
-# Both sides run the *same* compile config (torch.compile max-autotune, RLinf
-# PR #968); the profile index labels the E-series rep "#968 max-autotune".
-#
-# The source tree calls these runs E0..E3.  E1 and E2 are single-factor arms
-# off E0, NOT a cumulative chain: E2 still has the type checks ON
-# (sm_120 profile notes, column "typecheck关").  The deltas below are therefore
-# all measured against the compile-only arm.
+# ⚠️  58.9 -> 52.60 is a change of ruler, NOT an optimization. The two are ~6 ms
+# apart because of measurement scope; never subtract them.
+# ⚠️  These rows are single-factor arms off the compile-only row, not a chain.
 #
 # (label, e2e_ms, delta_vs_compile_only, source)
 PREHISTORY = [
@@ -244,44 +197,14 @@ PREHISTORY = [
      "the profile index (opt_E3/) - -10.5% vs compile-only"),
 ]
 
-# --- panel 3: the same optimizations, counted per denoise step -------------
-# Ruler: GPU busy per denoise step = union of kernel intervals over the denoise
-# loop, / 10 steps.  At bs=1 nothing overlaps, so this equals the naive sum of
-# kernel durations (the realtime-vla head-to-head), which is how the
-# later rows were measured (nsys 2026.1.2, stream 157).  All rows and BOTH
-# peers sit on this one ruler.
+# --- panel 3: the same optimizations, per denoise step.
+# Ruler: union of kernel intervals over the denoise loop / 10 steps. At bs=1
+# nothing overlaps, so this equals the sum of kernel durations. All rows and both
+# peers sit on this one ruler; each row's own source is in its tuple below.
 #
-#   2025.6 / 347 k  the denoise MFU analysis  "OURS baseline (pre-cache)",
-#                   denoise-loop busy 20.256 ms/predict, kernels/step 347
-#   1620.9 / 346 k  the denoise MFU analysis  "OURS + adaRMS cache",
-#                   16.209 ms/predict - same table, same session => PAIRED
-#   1368.0 / 305 k  the profile index = the kernel-fusion results
-#                   (base.nsys-rep, both fusions off), 20 predicts
-#   1236.0 / 238 k  the profile index = the kernel-fusion results
-#                   (f_guard.nsys-rep, shipped).  the kernel-fusion results states
-#                   the delta as -132.0 (-9.6 %) => PAIRED with 1368.0
-#   1185.0 / 217 k  pi05-infer commit 62aa78e; the measurement log,205.
-#                   Its own paired baseline is 1232.3 (prof_skip0, same
-#                   session), i.e. -47.3; on this chain the drop reads -51.0.
-#
-# Caveats deliberately encoded in the chart text:
-#   - row 2 lumps four optimizations and is CROSS-SESSION (07-25 -> 07-27), not
-#     a paired A/B.  Note also the denoise MFU analysis: the captured graph
-#     is *not* faster in GPU-busy terms - it converts idle into busy
-#     (idle/predict 3.74 -> 0.93 ms).  Its win shows up in wall clock, not here.
-#   - the 07-28 per-kernel census of the 238-kernel build reads 1232.6
-#     (the 2026-07-28 handoff) and its step_idle union reads 1233.3 - same
-#     build as 1236.0, different session.  Not charted as a step.
-#   - the earlier rungs on the *wall-clock* ruler (2255 us/step at the
-#     2026-07-09 baseline; 2286 -> 1881 for the adaRMS pairing) are a different
-#     ruler and are left to the README prose rather than mixed in here.
-#   - NOT charted: the oldest figure, "2115 us/step @ 417 kernels"
-#     (the latency-investigation handoff). Its source sqlite is not in the
-#     tree (the profile index), and 2.115 ms is exactly the
-#     `denoise/expert_forward` span in the sibling profile
-#     (the bubble-timeline results) while `denoise/loop` there is 2.255 - so
-#     it is probably expert-only, a narrower scope than every other number
-#     here.  Left out rather than charted on a guess.
+# ⚠️  Row 2 lumps four optimizations and is cross-session, not a paired A/B --
+# marked in the chart. The captured graph is not faster in GPU-busy terms at all;
+# it converts idle into busy, so its win shows up only in wall clock.
 #
 # (label, us_after, delta, kernels, paired?, source)
 DEN_BASE = (2025.6, 347, "the denoise MFU analysis (pre-adaRMS-cache baseline)")
@@ -297,39 +220,25 @@ DEN_LEDGER = [
 ]
 
 # --- the two reference implementations, on both panel 2 and panel 3 --------
-# dexmal/realtime-vla @ b86a942, our config, our GPU, same day, real (non-zero)
-# weights, our e2e scope.  the realtime-vla head-to-head (scope B, n=30,
-# sd 0.20) and :271 (1191.0 us/step, sd 13.2, 165 kernels/step).  The only
-# *paired* head-to-head we have is that same line: theirs 43.41 vs ours-that-day
-# 44.55, i.e. theirs faster by 1.14 ms; and 1191.0 vs our 1368.7 that day.
+# dexmal/realtime-vla @ b86a942: our config, our GPU, same day, real weights, our
+# e2e scope. The only paired head-to-head we have is that run, and we lost it:
+# theirs 43.41 vs ours-that-day 44.55.
 PEER_MS = 43.41
 PEER_US, PEER_KERN = 1191.0, 165
 # limxdynamics/FluxVLA @ 7f9f774 - a DIFFERENT repo from dexmal/realtime-vla.
-# the FluxVLA baseline notes - 44.9 ms/predict at 968 prefix tokens
-# (their own default is a lighter 560-token config that runs 31.1 ms; that one
-# must never be compared against our 968-token numbers).  1419.0 us/step and
-# ~205 kernels/step: the denoise MFU analysis,98 - the same table and the
-# same ruler as our 2025.6 / 1620.9 rows.
-# NOT config-matched to us, in both directions:
-#   - chunk 10, not 50 (the realtime-vla head-to-head) -> cheaper for them
-#   - their timer skips the CPU preprocessing ours includes, ~2-3 ms
-#     (the FluxVLA baseline notes)        -> cheaper for them
-#   - their loop recomputes adaRMS + the time MLP every step and does a device
-#     sync per call (the realtime-vla head-to-head) -> costlier
-# the profile index retracts the old "their code at our config =
-# 44.89 ms, dead heat" reading of this run: what was retracted is the
-# *attribution* (wrong repo) and the "dead heat" verdict, not the measurement.
+# 44.9 ms/predict at 968 prefix tokens. Their own default is a lighter 560-token
+# config at 31.1 ms, which must never be compared against our 968-token numbers.
+#
+# ⚠️  NOT config-matched, in both directions: chunk 10 not 50, and their timer
+# skips the ~2-3 ms of CPU preprocessing ours includes (both cheaper for them);
+# their loop recomputes adaRMS every step and syncs per call (costlier).
 FLUX_MS = 44.9
 FLUX_US, FLUX_KERN = 1419.0, 205
 
 
-# --------------------------------------------------------------------------
-# Provenance stamp
-# --------------------------------------------------------------------------
-# Each chart is a snapshot of one commit, and main has moved past all three.
-# Deliberately not redrawn: grafting today's numbers onto a paired chain measured
-# arm-by-arm is the chained-rulers error these charts exist to warn about. Stamp
-# what each one is; the README carries the current absolute.
+# Provenance stamp. Each chart is a snapshot of one commit and main has moved on;
+# not redrawn, because grafting today's numbers onto a paired chain is the
+# chained-rulers error these charts exist to warn about.
 STAMPS = {
     "ledger": "chart state: pi05-infer @ 62aa78e\n"
               "rows measured 2026-07-11..07-28\n"
@@ -544,11 +453,9 @@ def chart_ledger(mode: str) -> None:
 
 
 # --------------------------------------------------------------------------
-# Chart 3 - denoise per-kernel breakdown, current build
+# Chart 2 - denoise per-kernel breakdown
 # --------------------------------------------------------------------------
-# Source: 20260728_adarms_cond/prof_skip1.sqlite, stream 157
-# (the hand-captured Stage-1 denoise graph), 12 predicts x 10 steps = 120 steps.
-# 217 kernels/step, 1185.0 us/step.
+# Source: 20260728_adarms_cond/prof_skip1.sqlite, stream 157, 120 steps.
 #
 # (label, us_per_step, kernels_per_step, group)
 #   group 0 = inductor-generated Triton
@@ -676,11 +583,9 @@ def chart_denoise(mode: str) -> None:
 # --------------------------------------------------------------------------
 # Chart 3 - phase split of GPU busy time
 # --------------------------------------------------------------------------
-# Source: 20260728_stage1/stage1_off.sqlite, 12 predicts.
-# Streams: 7 = PaliGemma prefix LM, 157 = denoise expert (inductor cudagraph),
-# 158 = SigLIP vision tower.  The --stage1 build merges 158 into 7 and pulls the
-# eager glue into 157, so the three-way split is read off the off arm; total GPU
-# busy per predict is the same to within 0.06 ms (40.32 vs 40.26).
+# Source: 20260728_stage1/stage1_off.sqlite, 12 predicts. Streams 7 = prefix LM,
+# 157 = denoise expert, 158 = SigLIP. Read off the OFF arm because --stage1
+# merges the streams; total GPU busy matches to within 0.06 ms.
 PHASES = [
     ("prefix: PaliGemma LM over 968 tokens", 24.10, 0),
     ("denoise: 10 x action expert", 11.40, 1),

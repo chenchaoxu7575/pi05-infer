@@ -13,39 +13,23 @@
 # limitations under the License.
 """One QKV GEMM per prefix-LM layer instead of three.
 
-Gemma-2B's projections are ``q: 2048x2048`` and, with one KV head of width 256,
-``k``/``v``: ``256x2048``.  Concatenating them along dim 0 into ``[2560, 2048]``
-is a mathematical identity -- each output column is an independent dot product
-over the same input row.  ``attention_bias=False``, so there is no bias to
-concatenate.  It pays because ``N = 256`` is too narrow to amortise the A-traffic:
-k+v are 0.9 % of the LM's FLOPs but 3.3 % of its kernel time.
+Concatenating ``q``/``k``/``v`` along dim 0 into ``[2560, 2048]`` is a
+mathematical identity (``attention_bias=False``, so no bias to concatenate). It
+pays because ``N = 256`` is too narrow to amortise the A-traffic: k+v are 0.9 %
+of the LM's FLOPs but 3.3 % of its kernel time.
 
-⚠️  **Layer 17 is deliberately excluded.**  Mathematical identity is not bit
-identity -- a wider N makes inductor pick a different kernel, which may split the
-K accumulation differently.  Measured: ``cat[q,k,v] -> 2560`` is bit-identical,
-but ``cat[k,v] -> 512`` (the shape the last layer would use, since
-``prefix_last_layer.py`` has already reduced it to k/v only) moves 39 % of
-elements by 1 ULP.  The denoise loop consumes that layer's KV cache, so fusing it
-would trade the bit-exactness claim for ~3 % of the win.
+⚠️  Layer 17 is excluded. A wider N makes inductor pick a different kernel:
+``cat[q,k,v] -> 2560`` is bit-identical, but ``cat[k,v] -> 512`` (what the last
+layer would use, since ``prefix_last_layer.py`` reduced it to k/v) moves 39 % of
+elements by 1 ULP -- and the denoise loop consumes that layer's KV cache.
 
-**Why a monkeypatch.**  The prefix runs on the *installed* transformers, not on
-the vendored ``pi05_infer.gemma`` fork, and that boundary is what makes "a denoise
-kernel change silently reached the prefix" structurally impossible.  So this
-module edits nothing: it swaps the instance ``forward`` of each ``GemmaAttention``
-and hangs one tensor off it, leaving the module tree, parameter names and
-``state_dict`` intact so weight sync keeps working.  Two properties make that
-safe: the joint prefix+suffix training forward never calls
-``GemmaAttention.forward`` (it reaches into ``q_proj``/``k_proj``/``v_proj``
-directly), and the patched forward handles only the prefill call, delegating
-everything else to the original.
+⚠️  ``_pi05_qkv_w`` is weight-derived and goes stale on an in-place weight sync.
+``refresh_fused_prefix_qkv`` re-derives it via ``copy_`` (never reallocating, so
+a captured graph stays valid) and is wired into
+``invalidate_weight_derived_caches``.
 
-⚠️  **``_pi05_qkv_w`` is weight-derived**: an in-place update of ``q_proj.weight``
-does not touch it, so it would keep serving stale weights after an RL weight sync.
-``refresh_fused_prefix_qkv`` re-derives it and is wired into
-``invalidate_weight_derived_caches``.  It uses ``copy_`` and never reallocates, so
-a captured CUDA graph referencing it stays valid.
-
-Kill switch: ``RLINF_FUSE_PREFIX_QKV=0``.
+Only the prefill call is patched; everything else delegates to the original
+forward. Kill switch: ``RLINF_FUSE_PREFIX_QKV=0``.
 """
 
 from __future__ import annotations
@@ -151,14 +135,9 @@ def _fused_qkv_attention_forward(
     q_lin, k_lin, v_lin = torch.split(qkv, self._pi05_qkv_split, dim=-1)
     query_states = q_lin.view(hidden_shape).transpose(1, 2)
     key_states = k_lin.view(hidden_shape).transpose(1, 2)
-    # `.contiguous()` on v only, and it is not cosmetic. Unfused, v_proj's output is
-    # its own [1, M, 256] buffer and the [1, 1, M, 256] transpose of it is contiguous
-    # (the kv-head dim is 1). Fused, v is a stride-2560 slice of the qkv buffer, and
-    # nothing downstream rewrites it -- q and k are both rematerialised by RoPE, v is
-    # not -- so the strided layout survives all the way into `prime_kv_static`'s
-    # `copy_`. Measured: 17 extra at::native::elementwise_kernel launches per predict,
-    # 3.17 us each (53.9 us/predict, ~315 GB/s), eagerly, outside the compiled graph.
-    # Making it contiguous here puts the copy inside the graph at full bandwidth.
+    # `.contiguous()` is load-bearing: v is a strided slice of the fused buffer and,
+    # unlike q and k, nothing downstream rematerialises it -- the stride would reach
+    # `prime_kv_static`'s copy_ and cost 17 eager kernels (53.9 us/predict).
     value_states = v_lin.view(hidden_shape).transpose(1, 2).contiguous()
 
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
