@@ -69,8 +69,8 @@ inductor 的 tile 选择是针对这张卡的 roofline 拐点和 SM 数调的,�
 而未打补丁的构建**在别的卡上会选中另一个 kernel** -- 参照系本身动了,这个声明在那边没有主语。
 
 代码不会拦你。它只警告一次,硬件相关的 tile pin 在非 sm_120 上会自己拒绝安装,
-每一项优化都有 `RLINF_*=0` kill switch。引用这里任何一个数之前,请先在你的卡上重跑
-[`tools/`](tools/README.md) 里的 gate。
+大部分优化带 `RLINF_*=0` kill switch(有四项结构性优化没有 -- 见下面的"验证"一节)。
+引用这里任何一个数之前,请先在你的卡上重跑 [`tools/`](tools/README.md) 里的 gate。
 
 ## 安装与运行
 
@@ -141,8 +141,13 @@ GATE_OFF="RLINF_SMALL_M_MM=0" GATE_ON="RLINF_SMALL_M_MM=1" \
   tools/bitexact_gate.sh /tmp/gate_small_m --stage1 --iters 1 --warmup 4
 ```
 
-每个 gate 都跑两个臂并各打印一个 digest,两个必须相同。每一项优化都带 kill switch,
-OFF 臂走的是被验证过的降级路径。
+每个 gate 都跑两个臂并各打印一个 digest,两个必须相同。
+
+大部分优化带 `RLINF_*=0` kill switch,gate 的 OFF 臂走的就是那条降级路径。有四项没有:
+adaRMS 预计算、动作专家内部融合的 QKV、静态 prefix-KV 缓冲、以及在 GPU 上构造的
+attention mask,这四项是结构性的,没有环境变量。它们只能靠
+`tools/bitexact_compiled_toggles.py --disable` 在活的模型上 monkey-patch 掉 --
+`run_bitexact_backfill.sh` 驱动的就是这件事。
 
 WARNING: **这里的位一致性是按编译路径分层的,并没有被无条件声明。** 有些项在 eager 下逐位相同,
 在实际发布用的 `max-autotune` 下并不 -- 而 `max-autotune` 自己的 kernel 选择在冷 autotune

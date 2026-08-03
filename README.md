@@ -78,8 +78,9 @@ produces on this card*, and an unpatched build picks a different kernel on a dif
 card. The reference itself moves, so the claim has no subject there.
 
 The code does not stop you. It warns once, the hardware-specific tile pin declines to
-install off sm_120 by itself, and every optimization has a `RLINF_*=0` kill switch. Re-run
-the gates in [`tools/`](tools/README.md) on your card before quoting any number from here.
+install off sm_120 by itself, and most optimizations carry an `RLINF_*=0` kill switch
+(four structural ones do not -- they are listed under Verification below). Re-run the
+gates in [`tools/`](tools/README.md) on your card before quoting any number from here.
 
 ## Install and run
 
@@ -156,8 +157,13 @@ GATE_OFF="RLINF_SMALL_M_MM=0" GATE_ON="RLINF_SMALL_M_MM=1" \
   tools/bitexact_gate.sh /tmp/gate_small_m --stage1 --iters 1 --warmup 4
 ```
 
-Each gate runs both arms and prints a digest; the two must match. Every optimization has a
-kill switch, and the OFF arm exercises a verified fallback path.
+Each gate runs both arms and prints a digest; the two must match.
+
+Most optimizations carry an `RLINF_*=0` kill switch, and a gate's OFF arm exercises that
+fallback path. Four do not: the adaRMS precompute, the action expert's fused QKV, the
+static prefix-KV buffer and the device-side attention mask are structural and have no env
+var. They can only be turned off by `tools/bitexact_compiled_toggles.py --disable`, which
+monkey-patches the seam on a live model -- that is what `run_bitexact_backfill.sh` drives.
 
 WARNING: **Bit-identity here is tiered by compile path, and is not claimed uniformly.** Some items
 are bit-identical under eager but not under the shipping `max-autotune`, whose own kernel
