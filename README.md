@@ -11,11 +11,10 @@ change of sampler, no reduction in denoising steps.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/ledger_dark.png">
-  <img alt="Paired A/B: 40.50 ms, -6.45 ms versus optimizations off, split into CPU overhead -0.80, denoise-step work removed -1.63, kernel fusion and optimization -3.03" src="docs/ledger_light.png">
+  <img alt="52.60 to 42.90 ms, split into CPU overhead -3.44, denoise-step work removed -3.09, kernel fusion and optimization -3.17" src="docs/ledger_light.png">
 </picture>
 
-Current `main`: **40.50 ms**, unlocked plain wall clock, n=30, p50.
-**-6.45 ms** against the same build with its switchable optimizations off.
+Current `main`: **40.50 ms** (unlocked wall clock).
 
 <details>
 <summary>Where a denoise step goes</summary>

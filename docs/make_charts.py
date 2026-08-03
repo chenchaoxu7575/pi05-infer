@@ -147,60 +147,48 @@ def _rounded_hbar(ax, y, x0, x1, height, color, radius_pt=4.0, zorder=3):
 
 
 # --------------------------------------------------------------------------
-# Chart 1 - what the shipped optimizations are worth
+# Chart 1 - improvement over the original baseline
 # --------------------------------------------------------------------------
-# 2026-08-03, commit 6d78b8a, RTX PRO 5000, torch 2.7.1+cu128, clocks UNLOCKED
-# and sampled. Alternating paired rounds, one shared inductor cache, GPU lock held
-# per round. Null control +0.07 +/- 0.12 ms over 9 rounds.
+# Baseline is the extracted model as it arrived: torch.compile max-autotune, none
+# of this work applied. e2e = predict_action_batch, plain CPU wall clock, 30 iters
+# after 8 warmups, serialized, RTX PRO 5000 at its 300 W default.
 #
-# TOTAL: all eight switchable optimizations off at once, vs shipping defaults.
-# CATEGORIES: leave-one-out from shipping defaults, so they are what you lose by
-# turning that group off. They do not sum to the total -- interactions, and four
-# more optimizations are structural and on in both arms of every round.
-ON_MS = 40.50
-TOTAL, TOTAL_SD = 6.45, 0.75
-NULL, NULL_SD = 0.07, 0.12
+# Each ledger row is its own paired A/B against the row above it, so the deltas
+# are additive; the three category totals are sums of those deltas and add to 9.70.
+BASE, LEDGER_END, NOW = 52.60, 42.90, 40.50
 
 CATS = [
     (
         "CPU overhead",
-        0.80,
-        0.43,
-        12,
+        3.44,
         [
             "capture one flow_ode step as a graph, replay it for every step",
-            "hoist the step-invariant mask / position ids / rotary table out of the loop",
-            "attention mask built on device (structural)",
-            "prefix KV into a static buffer (structural)",
+            "prefix KV into a static buffer",
+            "attention mask built on device",
+            "extract to a standalone package",
         ],
     ),
     (
         "denoise-step work removed",
-        1.63,
-        0.14,
-        4,
+        3.09,
         [
-            "precompute the adaRMS modulation table, 37 projections -> 1 gather (structural)",
+            "precompute the adaRMS modulation table, 37 projections -> 1 gather",
             "drop the timestep conditioning nothing reads",
-            "drop the prefix LM's last-layer tail -- only its KV is consumed",
         ],
     ),
     (
         "kernel fusion & optimization",
-        3.03,
-        0.11,
-        4,
+        3.17,
         [
-            "GeGLU and RoPE fused into the GEMM epilogue (two Triton kernels)",
-            "Q/K/V into a single GEMM, expert (structural) and prefix",
-            "retuned down_proj / o_proj tiles; pinned the Q*K^T tile",
+            "GeGLU and RoPE fused into the GEMM epilogue",
+            "Q/K/V into a single GEMM",
         ],
     ),
 ]
 
-FOOTNOTE = (
-    "categories are leave-one-out and do not sum to the total; four more "
-    "optimizations are structural and on in both arms"
+SINCE = (
+    "since then, each on its own baseline: fused prefix QKV, retiled "
+    "down_proj / o_proj, pinned the Q*K^T tile"
 )
 
 
@@ -208,56 +196,84 @@ def chart_ledger(mode: str) -> None:
     t = THEMES[mode]
     _style(t)
     colors = [t["s1"], t["s2"], t["s3"]]
+    span = BASE - LEDGER_END
 
-    fig = plt.figure(figsize=(10.5, 6.0), dpi=200)
-    ax = fig.add_axes((0.325, 0.660, 0.560, 0.200))
-    ax.set_xlim(0, 3.6)
-    ax.set_ylim(-0.65, 2.65)
+    fig = plt.figure(figsize=(10.5, 5.6), dpi=200)
+    ax = fig.add_axes((0.035, 0.660, 0.930, 0.090))
+    ax.set_xlim(0, span)
+    ax.set_ylim(-0.5, 0.5)
     ax.axis("off")
 
-    for i, ((label, ms, sd, n, _items), c) in enumerate(zip(CATS, colors)):
-        y = 2 - i
-        _rounded_hbar(ax, y, 0, ms, 0.60, c, radius_pt=3.0)
+    x = 0.0
+    for (label, ms, _items), c in zip(CATS, colors):
+        _rounded_hbar(ax, 0, x, x + ms, 0.95, c, radius_pt=3.0)
         ax.text(
-            ms + 0.06,
-            y,
-            f"-{ms:.2f} ms",
-            ha="left",
+            x + ms / 2,
+            0.06,
+            f"-{ms:.2f}",
+            ha="center",
             va="center",
-            fontsize=11,
+            fontsize=13,
             fontweight="bold",
-            color=t["ink"],
+            color=t["surface"],
         )
-        fy = 0.660 + 0.200 * (y + 0.65) / 3.30
-        fig.text(0.310, fy, label, ha="right", va="center", fontsize=10.5, color=t["ink"])
+        ax.text(
+            x + ms / 2,
+            -0.26,
+            label,
+            ha="center",
+            va="center",
+            fontsize=8.5,
+            color=t["surface"],
+        )
+        x += ms
 
     fig.suptitle(
-        f"pi0.5 action expert, bs=1:   {ON_MS:.2f} ms,   -{TOTAL:.2f} ms "
-        f"vs optimizations off",
+        f"pi0.5 action expert, bs=1:   {BASE:.2f} -> {LEDGER_END:.2f} ms   "
+        f"(-{span:.2f} ms, -{100 * span / BASE:.1f}%)",
         x=0.035,
         y=0.950,
         ha="left",
-        fontsize=15,
+        fontsize=15.5,
         fontweight="bold",
         color=t["ink"],
     )
     fig.text(
         0.035,
         0.888,
-        f"paired A/B, one session, unlocked plain wall clock.  "
-        f"total sd {TOTAL_SD:.2f};  null control +{NULL:.2f} +/- {NULL_SD:.2f} ms.",
+        "end-to-end predict_action_batch, plain wall clock.  Baseline is the model "
+        "as extracted: torch.compile max-autotune, none of this applied.",
         ha="left",
         fontsize=9.5,
         color=t["ink2"],
     )
+    fig.text(
+        0.035,
+        0.775,
+        f"{BASE:.2f} ms",
+        ha="left",
+        va="bottom",
+        fontsize=10.5,
+        color=t["ink2"],
+    )
+    fig.text(
+        0.965,
+        0.775,
+        f"{LEDGER_END:.2f} ms",
+        ha="right",
+        va="bottom",
+        fontsize=10.5,
+        fontweight="bold",
+        color=t["ink"],
+    )
 
-    y = 0.575
-    for (label, ms, sd, n, items), c in zip(CATS, colors):
+    y = 0.565
+    for (label, ms, items), c in zip(CATS, colors):
         fig.patches.append(
             plt.Rectangle(
                 (0.035, y - 0.004),
                 0.012,
-                0.026,
+                0.028,
                 transform=fig.transFigure,
                 facecolor=c,
                 edgecolor="none",
@@ -267,23 +283,33 @@ def chart_ledger(mode: str) -> None:
         fig.text(
             0.057,
             y,
-            f"{label}   -{ms:.2f} +/- {sd:.2f} ms, n={n}",
+            label,
             ha="left",
             va="bottom",
-            fontsize=10.5,
+            fontsize=12,
             fontweight="bold",
             color=t["ink"],
         )
-        y -= 0.042
+        fig.text(
+            0.965,
+            y,
+            f"-{ms:.2f} ms",
+            ha="right",
+            va="bottom",
+            fontsize=12,
+            fontweight="bold",
+            color=t["ink"],
+        )
+        y -= 0.052
         for it in items:
-            fig.text(0.057, y, it, ha="left", va="bottom", fontsize=9, color=t["ink2"])
-            y -= 0.033
-        y -= 0.013
+            fig.text(0.057, y, it, ha="left", va="bottom", fontsize=9.5, color=t["ink2"])
+            y -= 0.040
+        y -= 0.018
 
     fig.text(
         0.035,
-        0.028,
-        FOOTNOTE,
+        0.030,
+        SINCE,
         ha="left",
         va="bottom",
         fontsize=8.5,
