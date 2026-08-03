@@ -33,6 +33,19 @@ anywhere the package is installed. They are the ones the root README points at.
 Every gate compares two arms and prints a digest; **the two digests must match**. They
 are written to declare INCONCLUSIVE rather than PASS when their own null control fails.
 
+**How many invocations each takes differs, and running the wrong number is silent.**
+`isolation_check.py`, `bitgate.py`, `bitexact_prefix_qkv.py` and `bitexact_rope_hoist.py`
+run both arms inside one process -- one command, both digests printed. The rest do not:
+
+| gate | invocations |
+|---|---|
+| `bitexact_denoise_gemms.py` | two, `RLINF_SMALL_M_MM=0` then `=1`, sharing one `TORCHINDUCTOR_CACHE_DIR` |
+| `bitexact_denoise_bmms.py` | two, same with `RLINF_SMALL_M_BMM` |
+| `bitexact_prefix_kv.py` | three -- `RLINF_SKIP_LAST_LM_LAYER=0 --out off.json`, `=1 --out on.json`, then `--compare off.json on.json` |
+
+Run one of those three as a single command and it prints one digest against nothing, and
+exits successfully. Each script's own docstring carries its exact invocation.
+
 ## 2. Compiled-path gate workers and diagnostics
 
 The first three are what `run_bitexact_backfill.sh` drives -- run them through it unless

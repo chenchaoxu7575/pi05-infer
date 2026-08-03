@@ -1,0 +1,10 @@
+kernel,role,origin,us_per_step,launches_per_step,pct_step,arithmetic_intensity,roofline_side
+_geglu_mm_kernel,GeGLU: gate/up GEMM + gelu(g)*u,ours,352.65,18,28.5,50,memory
+triton_tem_fused_mm_6,down_proj GEMM,inductor,219.64,18,17.7,48,memory
+_qkv_rope_kernel,QKV GEMM + RoPE -> static KV,ours,159.71,18,12.9,48,memory
+triton_tem_fused_clone_mm_4,o_proj GEMM (+ transpose prologue),inductor,141.64,18,11.4,48,memory
+triton_tem_fused_bmm_3,attention P*V,inductor,129.55,18,10.5,154,critical
+triton_tem_fused_bmm_1,attention Q*K^T,inductor,91.91,18,7.4,282,compute
+triton_per_fused__softmax_*,masked softmax,inductor,40.19,18,3.2,,
+[everything else],52 assorted kernels,mixed,103.86,64,8.4,,
+TOTAL,,,1239.15,190,100.0,,
