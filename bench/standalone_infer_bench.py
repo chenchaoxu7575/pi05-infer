@@ -63,7 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--image-size",
         type=int,
-        default=128,
+        default=224,
         help="Input camera resolution; the openpi transform resizes to 224.",
     )
     parser.add_argument(
@@ -102,6 +102,13 @@ def parse_args() -> argparse.Namespace:
         "--phases",
         action="store_true",
         help="Also print a sync-timed per-phase decomposition of predict.",
+    )
+    parser.add_argument(
+        "--model-only",
+        action="store_true",
+        help="Time sample_actions() instead of the whole predict_action_batch(): "
+        "the four obs transforms are hoisted out of the loop and output_transform "
+        "is dropped, leaving prefix + denoise. This is the reported figure.",
     )
     parser.add_argument(
         "--cuda-profiler",
@@ -309,12 +316,31 @@ def _read_clocks(device_index: int) -> dict:
         return {"error": repr(exc)}
 
 
+def _model_span(model, env_obs: dict, model_only: bool):
+    """Return the callable to time, and the name it is reported under."""
+    if not model_only:
+        return (lambda: model.predict_action_batch(env_obs)), "predict_action_batch"
+    from openpi.models import model as _model
+
+    # hoist the host-side obs marshalling out of the timed span; it is identical
+    # on every iteration and is not model inference
+    with torch.no_grad():
+        obs = _model.Observation.from_dict(
+            model.precision_processor(
+                model.input_transform(model.obs_processor(env_obs), transpose=False)
+            )
+        )
+    return (lambda: model.sample_actions(obs)), "sample_actions"
+
+
 def run_e2e(model, env_obs: dict, args: argparse.Namespace) -> None:
-    """Time N full predict_action_batch calls: CPU wall clock + GPU span."""
+    """Time N calls of the span selected by --model-only: CPU wall clock + GPU span."""
+    call, span = _model_span(model, env_obs, getattr(args, "model_only", False))
+
     print(f"warmup x{args.warmup} (absorbs compile/autotune; may take minutes) ...")
     for _ in range(args.warmup):
         with torch.no_grad():
-            model.predict_action_batch(env_obs)
+            call()
     torch.cuda.synchronize()
     if getattr(args, "stage1", False):
         # After warmup the lazy capture must have happened; assert before timing so a
@@ -335,7 +361,7 @@ def run_e2e(model, env_obs: dict, args: argparse.Namespace) -> None:
             t0 = time.perf_counter()
             start_evt.record()
             with torch.no_grad():
-                model.predict_action_batch(env_obs)
+                call()
             end_evt.record()
             torch.cuda.synchronize()
             wall_ms.append((time.perf_counter() - t0) * 1e3)
@@ -346,7 +372,7 @@ def run_e2e(model, env_obs: dict, args: argparse.Namespace) -> None:
     if args.cuda_profiler:
         torch.cuda.profiler.stop()
 
-    print(f"\n=== e2e predict_action_batch (bs={args.batch_size}, n={args.iters}) ===")
+    print(f"\n=== e2e {span} (bs={args.batch_size}, n={args.iters}) ===")
     print(f"  cpu wall clock [ms]  {_stats_ms(wall_ms)}")
     # GPU span (first->last GPU work), comparable to nsys projection, not busy time.
     print(f"  gpu event span [ms]  {_stats_ms(gpu_ms)}")
