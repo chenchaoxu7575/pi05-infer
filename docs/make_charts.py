@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Regenerate the two README charts (light + dark PNG for each).
+"""Regenerate the three README charts (light + dark PNG for each).
 
-    python docs/make_charts.py [--sqlite <on.sqlite> --sqlite-off <off.sqlite>]
+    python docs/make_charts.py [--sqlite <denoise.sqlite>]
 
-Chart 1 groups the paired A/B ledger into three blocks of work. Chart 2 is the
-per-kernel breakdown of one denoise step, from an nsys sqlite export; --sqlite
-re-derives it and prints what it derived so it can be diffed against the
-constants below.
+    ledger    the same three blocks of work, on end-to-end wall clock
+    denoise   the same three blocks, on GPU time per denoise step
+    phases    where the shipping build's model-inference GPU time goes
+
+--sqlite prints the per-step total and top kernels of an nsys export, to check
+a D_* constant below against its source.
 """
 
 from __future__ import annotations
@@ -149,8 +151,8 @@ def _rounded_hbar(ax, y, x0, x1, height, color, radius_pt=4.0, zorder=3):
 # --------------------------------------------------------------------------
 # Chart 1 - eager to current, one ruler
 # --------------------------------------------------------------------------
-# Five absolutes measured in one session, unlocked plain wall clock, so the
-# deltas are differences of consecutive absolutes and chain by construction.
+# Five arms, one session, six rounds of rotating order, each delta paired within
+# a round. Span is sample_actions (--model-only).
 #
 #   EAGER   --no-compile
 #   BASE    torch.compile max-autotune, all twelve optimizations off
@@ -158,18 +160,35 @@ def _rounded_hbar(ax, y, x0, x1, height, color, radius_pt=4.0, zorder=3):
 #   C2      + denoise-step work removed
 #   C3      + kernel fusion & optimization   (= shipping defaults)
 #
-# None is None -> the chart renders that value as a placeholder.
-EAGER = None
-BASE = None
-C1 = None
-C2 = None
-C3 = None
+# UNLOCKED, stock configuration -- the card as shipped, 300 W cap, no -lgc. That
+# is what a reader has. It costs some resolution: base..c3 all draw 293-301 W
+# against the cap, so the SM clock falls along the chain and each arm is compared
+# against a predecessor running faster. ENV is printed per arm so that is visible
+# rather than hidden. The locked chain, where every arm runs at one clock, is in
+# docs/locked_clock.md and is never chained onto anything here.
+#
+# None -> the chart renders that value as a placeholder.
+EAGER = 124.71
+BASE = 51.57
+C1 = 48.16
+C2 = 42.90
+C3 = 39.64
+
+# SM clock and board power, median over each arm's timed window
+ENV = {
+    "eager": (2325, 172),
+    "base": (2437, 295),
+    "c1": (2362, 301),
+    "c2": (2317, 301),
+    "c3": (2220, 301),
+}
+POWER_CAP_W = 300
 
 CATS = [
     (
         "CPU overhead",
         [
-            "capture one flow_ode step as a graph, replay it for every step",
+            "capture one denoise step as a graph, replay it for every step",
             "hoist the step-invariant mask / position ids / rotary table",
             "prefix KV into a static buffer",
             "attention mask built on device",
@@ -194,8 +213,18 @@ CATS = [
 ]
 
 
+_ARMS = ("base", "c1", "c2", "c3")
+
+
 def _ms(v):
     return "--.--" if v is None else f"{v:.2f}"
+
+
+def _env_footer():
+    """SM clock and power per arm, in chain order -- the cap decay, made visible."""
+    decay = "  ->  ".join(f"{a} {ENV[a][0]} MHz {ENV[a][1]} W" for a in _ARMS)
+    e_mhz, e_w = ENV["eager"]
+    return f"{decay}          eager {e_mhz} MHz {e_w} W, never near the cap"
 
 
 def chart_ledger(mode: str) -> None:
@@ -210,19 +239,20 @@ def chart_ledger(mode: str) -> None:
     geo = stages if have else [50.0, 47.0, 45.2, 43.0]
 
     fig = plt.figure(figsize=(10.5, 6.4), dpi=200)
-    ax = fig.add_axes((0.345, 0.120, 0.620, 0.560))
+    rect = (0.345, 0.150, 0.620, 0.560)
+    ax = fig.add_axes(rect)
     lo = geo[3] - (geo[0] - geo[3]) * 0.10
     hi = geo[0] + (geo[0] - geo[3]) * 0.06
     ax.set_xlim(lo, hi)
     ax.set_ylim(-0.6, 2.6)
     _chrome(ax, t)
     ax.set_yticks([])
-    ax.set_xlabel("end-to-end predict_action_batch (ms)", fontsize=9.5)
+    ax.set_xlabel("model inference per predict (ms)", fontsize=9.5)
 
     for i, ((label, items), c) in enumerate(zip(CATS, colors)):
         y = 2 - i
         left, right = geo[i + 1], geo[i]
-        _rounded_hbar(ax, y, left, right, 0.46, c, radius_pt=3.0)
+        _rounded_hbar(ax, y, left, right, 0.33, c, radius_pt=3.0)
         ax.text(
             left - (hi - lo) * 0.012,
             y,
@@ -244,10 +274,10 @@ def chart_ledger(mode: str) -> None:
         )
         if i == 2:
             ax.text(
-                left - (hi - lo) * 0.012,
-                y - 0.42,
+                left,
+                y - 0.40,
                 f"{_ms(C3)} ms",
-                ha="right",
+                ha="left",
                 va="top",
                 fontsize=11,
                 fontweight="bold",
@@ -255,6 +285,16 @@ def chart_ledger(mode: str) -> None:
             )
 
     ax.axvline(geo[0], color=t["axis"], lw=1.0, ls=(0, (4, 3)), zorder=1)
+
+    fig.text(
+        0.035,
+        0.038,
+        _env_footer(),
+        ha="left",
+        va="bottom",
+        fontsize=8,
+        color=t["muted"],
+    )
 
     fig.suptitle(
         f"pi0.5 action expert, bs=1:   {_ms(BASE)} -> {_ms(C3)} ms   "
@@ -270,6 +310,14 @@ def chart_ledger(mode: str) -> None:
     fig.text(
         0.035,
         0.905,
+        f"stock configuration -- unlocked clock, {POWER_CAP_W} W cap",
+        ha="left",
+        fontsize=9,
+        color=t["muted"],
+    )
+    fig.text(
+        0.035,
+        0.855,
         "The baseline is already compiled. torch.compile gets there first:",
         ha="left",
         fontsize=9.5,
@@ -278,18 +326,22 @@ def chart_ledger(mode: str) -> None:
     gain = EAGER - BASE if (EAGER is not None and BASE is not None) else None
     fig.text(
         0.035,
-        0.852,
+        0.800,
         f"eager {_ms(EAGER)} ms  ->  torch.compile max-autotune {_ms(BASE)} ms"
-        f"   ({'-' + _ms(gain) if gain else '--.--'} ms,"
-        f" {f'-{100 * gain / EAGER:.1f}%' if gain else '--.-%'})",
+        f"   ({'-' + _ms(gain) if gain is not None else '--.--'} ms,"
+        f" {f'-{100 * gain / EAGER:.1f}%' if gain is not None else '--.-%'})",
         ha="left",
         fontsize=11,
         fontweight="bold",
         color=t["ink"],
     )
 
-    rows = [0.615, 0.395, 0.185]
-    for (label, items), c, fy in zip(CATS, colors, rows):
+    # each text block is centred on its own bar, in figure coords
+    def _bar_fig_y(d):
+        return rect[1] + rect[3] * (d + 0.6) / 3.2
+
+    for i, ((label, items), c) in enumerate(zip(CATS, colors)):
+        fy = _bar_fig_y(2 - i) + 0.016 + (len(items) - 1) * 0.0155
         fig.patches.append(
             plt.Rectangle(
                 (0.035, fy - 0.004),
@@ -332,159 +384,235 @@ def chart_ledger(mode: str) -> None:
 
 
 # --------------------------------------------------------------------------
-# Chart 2 - denoise per-kernel breakdown
+# Chart 2 - the same three categories, measured on one denoise step
 # --------------------------------------------------------------------------
-DENOISE = [
-    ("GeGLU: gate/up GEMM + gelu(g)*u  [fused]", 312.41, 18, 2),
-    ("down_proj GEMM", 271.19, 18, 0),
-    ("o_proj GEMM (+ transpose prologue)", 152.46, 18, 0),
-    ("QKV GEMM + RoPE -> static KV  [fused]", 131.79, 18, 2),
-    ("attention BMM  P*V", 110.40, 18, 0),
-    ("attention BMM  Q*K^T", 69.27, 18, 0),
-    ("adaRMS: gated residual + RMSNorm + scale/shift", 57.29, 42, 0),
-    ("eager per-step glue (embed_suffix, Euler, log-prob, position ids)", 50.63, 49, 1),
-    ("masked softmax", 29.57, 18, 0),
-]
-DENOISE_TOTAL_US = 1185.01
-DENOISE_TOTAL_KERNELS = 217.0
-
-GROUP_NAMES = {
-    0: "inductor Triton (torch.compile max-autotune-no-cudagraphs)",
-    1: "eager per-step glue - was 99.7 us / 70 k",
-    2: "hand-written fused Triton kernel (this project)",
-}
-
-
-def derive_denoise(sqlite_path: str, n_steps: float = 120.0) -> None:
-    """Re-derive chart 2 from a profile and print it next to the constants."""
-    c = sqlite3.connect(sqlite_path)
-    rows = c.execute(
-        "select s.value, count(*), sum(k.end - k.start) / 1e3 "
-        "from CUPTI_ACTIVITY_KIND_KERNEL k join StringIds s on s.id = k.demangledName "
-        "where k.streamId = 157 group by 1"
-    ).fetchall()
-
-    def bucket(name: str) -> str:
-        # "_swiglu_mm_kernel" is an older name for the same kernel;
-        # archived profiles still carry it.
-        if name in ("_geglu_mm_kernel", "_swiglu_mm_kernel"):
-            return "GeGLU: gate/up GEMM + gelu(g)*u  [fused]"
-        if name == "triton_tem_fused_mm_6":
-            return "down_proj GEMM"
-        if name == "triton_tem_fused_clone_mm_4":
-            return "o_proj GEMM (+ transpose prologue)"
-        if name == "_qkv_rope_kernel":
-            return "QKV GEMM + RoPE -> static KV  [fused]"
-        if name == "triton_tem_fused_bmm_3":
-            return "attention BMM  P*V"
-        if name == "triton_tem_fused_bmm_1":
-            return "attention BMM  Q*K^T"
-        if "softmax" in name:
-            return "masked softmax"
-        if "mean_mul_pow_rsqrt" in name:
-            return "adaRMS: gated residual + RMSNorm + scale/shift"
-        return "eager per-step glue (embed_suffix, Euler, log-prob, position ids)"
-
-    agg: dict[str, list[float]] = {}
-    for name, cnt, us in rows:
-        b = bucket(name)
-        a = agg.setdefault(b, [0.0, 0.0])
-        a[0] += us / n_steps
-        a[1] += cnt / n_steps
-    print(f"derived from {sqlite_path} (stream 157, {n_steps:.0f} steps):")
-    for label, us, k, _g in DENOISE:
-        d_us, d_k = agg.get(label, (0.0, 0.0))
-        flag = "" if abs(d_us - us) < 0.05 and abs(d_k - k) < 0.05 else "   <-- DIFFERS"
-        print(
-            f"  {label:66s} {d_us:8.2f} us/step ({us:8.2f})  "
-            f"{d_k:6.2f} k/step ({k:6.2f}){flag}"
-        )
-    print(
-        f"  {'TOTAL':66s} {sum(v[0] for v in agg.values()):8.2f} us/step "
-        f"({DENOISE_TOTAL_US:8.2f})  {sum(v[1] for v in agg.values()):6.2f} k/step "
-        f"({DENOISE_TOTAL_KERNELS:6.2f})"
-    )
+# Same arms as chart 1, profiled under nsys with the clock locked, so a
+# per-kernel measurement is not reading clock drift. GPU time on the denoise
+# stream, per step; a predict runs ten steps.
+#
+# None -> rendered as a placeholder.
+D_BASE = 2477.56
+D_C1 = 2252.04
+D_C2 = 1792.18
+D_C3 = 1237.83
 
 
 def chart_denoise(mode: str) -> None:
+    """Descending waterfall of GPU time per denoise step."""
     t = THEMES[mode]
     _style(t)
-    colors = {0: t["s1"], 1: t["s2"], 2: t["s3"]}
-    fig, ax = plt.subplots(figsize=(10.5, 5.4), dpi=200)
+    colors = [t["s1"], t["s2"], t["s3"]]
 
-    n = len(DENOISE)
-    ys = list(range(n))[::-1]
-    # headroom on the right so the longest value label ("312.5 us  18/step",
-    # on the top bar) clears the figure edge instead of being clipped
-    ax.set_xlim(0, 432)
-    ax.set_ylim(-0.7, n - 0.3)
-    fig.subplots_adjust(left=0.415, right=0.985, top=0.875, bottom=0.205)
+    stages = [D_BASE, D_C1, D_C2, D_C3]
+    have = all(v is not None for v in stages)
+    geo = stages if have else [2000.0, 1750.0, 1500.0, 1240.0]
+
+    fig = plt.figure(figsize=(10.5, 4.6), dpi=200)
+    rect = (0.345, 0.200, 0.620, 0.560)
+    ax = fig.add_axes(rect)
+    lo = geo[3] - (geo[0] - geo[3]) * 0.10
+    hi = geo[0] + (geo[0] - geo[3]) * 0.06
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(-0.6, 2.6)
     _chrome(ax, t)
-
-    for y, (label, us, kern, grp) in zip(ys, DENOISE):
-        _rounded_hbar(ax, y, 0, us, 0.56, colors[grp])
-        ax.text(
-            us + 5,
-            y,
-            f"{us:.1f} us   {kern:g}/step",
-            ha="left",
-            va="center",
-            fontsize=9,
-            color=t["ink"] if grp == 2 else t["ink2"],
-            fontweight="bold" if grp == 2 else "normal",
-        )
-
-    ax.set_yticks(ys)
-    ax.set_yticklabels([d[0] for d in DENOISE], fontsize=9)
+    ax.set_yticks([])
     ax.set_xlabel("GPU time per denoise step (us)", fontsize=9.5)
 
-    handles = [
-        plt.Line2D(
-            [], [], marker="s", ls="", markersize=9, color=colors[g], label=GROUP_NAMES[g]
+    for i, ((label, _items), c) in enumerate(zip(CATS, colors)):
+        y = 2 - i
+        left, right = geo[i + 1], geo[i]
+        _rounded_hbar(ax, y, left, right, 0.46, c, radius_pt=3.0)
+        ax.text(
+            left - (hi - lo) * 0.012,
+            y,
+            f"-{right - left:.0f}" if have else "--",
+            ha="right",
+            va="center",
+            fontsize=11.5,
+            fontweight="bold",
+            color=t["ink"],
         )
-        for g in (2, 0, 1)
-    ]
-    # figure-level, below the axes: inside the axes the legend sat on top of
-    # the two shortest bars' rows
-    fig.legend(
-        handles=handles,
-        loc="lower left",
-        bbox_to_anchor=(0.010, 0.048),
-        ncol=3,
-        frameon=False,
-        fontsize=8.5,
-        labelcolor=t["ink2"],
-        handletextpad=0.6,
-        borderpad=0.2,
-        columnspacing=1.6,
-    )
+        fy = rect[1] + rect[3] * (y + 0.6) / 3.2
+        fig.text(0.330, fy, label, ha="right", va="center", fontsize=10.5, color=t["ink"])
+
+    ax.axvline(geo[0], color=t["axis"], lw=1.0, ls=(0, (4, 3)), zorder=1)
 
     fig.suptitle(
-        "Where a denoise step goes: 1185.0 us, 217 kernels",
-        x=0.012,
+        f"One denoise step:   {_ms(D_BASE)} -> {_ms(D_C3)} us"
+        f"   ({'-' + f'{D_BASE - D_C3:.0f}' if have else '--'} us,"
+        f" {f'-{100 * (D_BASE - D_C3) / D_BASE:.1f}%' if have else '--.-%'})",
+        x=0.035,
+        y=0.945,
         ha="left",
         fontsize=14,
         fontweight="bold",
         color=t["ink"],
     )
     fig.text(
-        0.012,
-        0.912,
-        "nsys 2026.1.2, stream 157 (Stage-1 captured graph), ",
+        0.035,
+        0.845,
+        "nsys, CUDA stream 157, clock locked 1897 MHz",
         ha="left",
         fontsize=9,
         color=t["ink2"],
     )
-    fig.text(
-        0.012,
-        0.013,
-        "the 37 adaRMS dense(cond) projections that used to cost 395 us/step here "
-        "(triton_per_fused_addmm_0, 300 instances) are gone - 0 instances",
-        ha="left",
-        fontsize=7.5,
-        color=t["muted"],
-    )
+
+    if not have:
+        fig.text(
+            0.965,
+            0.035,
+            "PLACEHOLDER -- measurement in flight",
+            ha="right",
+            va="bottom",
+            fontsize=9,
+            color=t["s2"],
+            fontweight="bold",
+        )
     fig.savefig(OUT / f"denoise_{mode}.png")
+    plt.close(fig)
+
+
+def derive_denoise(sqlite_path: str, n_steps: float = 120.0) -> None:
+    """Print per-step GPU time on the denoise stream, to fill the constants above."""
+    con = sqlite3.connect(sqlite_path)
+    names = dict(con.execute("select id, value from StringIds"))
+    rows = con.execute(
+        "select shortName, sum(end - start) from CUPTI_ACTIVITY_KIND_KERNEL "
+        "where streamId = 157 group by shortName"
+    ).fetchall()
+    total = sum(v for _, v in rows) / 1e3 / n_steps
+    print(f"{sqlite_path}: {total:.2f} us/step over {len(rows)} distinct kernels")
+    for sid, v in sorted(rows, key=lambda r: -r[1])[:8]:
+        print(f"  {names.get(sid, sid)[:52]:<52} {v / 1e3 / n_steps:8.2f}")
+
+
+# --------------------------------------------------------------------------
+# Chart 3 - where the shipping build spends GPU time
+# --------------------------------------------------------------------------
+# Model inference only: GPU kernels attributed to their innermost enclosing NVTX
+# range, so preprocessing and the output transform are outside it. Commit
+# eccaeb6, shipping defaults, clock locked 1897 MHz, 12 predicts.
+# Re-derive with: tools/prefix_census.py <sqlite> 12
+PHASES = [
+    ("prefix: SigLIP vision, 3 views", 5933.7),
+    ("prefix: PaliGemma LM over 968 tokens", 24443.2),
+    ("denoise: 10 x action expert", 12391.5),
+    ("everything else", 116.5),
+]
+
+# Each phase is normalized against the roofline that actually binds it, so the
+# three percentages are comparable. Peak is 206.2 TFLOP/s bf16 and 1222 GB/s at
+# the 1897 MHz these phases were timed at; the knee is 169 FLOP/byte. The two
+# prefix intensities are upper bounds (weight bytes, no ncu DRAM counter), hence
+# ">"; the achieved FLOP/s behind their verdicts is shape-exact and needs no
+# byte count. The per-phase roofline derivation lives in the internal record.
+ROOFLINE = {
+    "prefix: SigLIP vision, 3 views": (
+        "compute-bound",
+        ">800 FLOP/byte",
+        "54-57% of peak FLOP/s",
+    ),
+    "prefix: PaliGemma LM over 968 tokens": (
+        "compute-bound",
+        ">1000 FLOP/byte",
+        "75-79% of peak FLOP/s",
+    ),
+    "denoise: 10 x action expert": (
+        "memory-bound",
+        "56 FLOP/byte",
+        "46% of peak DRAM BW",
+    ),
+}
+
+
+def chart_phases(mode: str) -> None:
+    """One bar: GPU busy per predict, split by phase."""
+    t = THEMES[mode]
+    _style(t)
+    colors = [t["s2"], t["s1"], t["s3"], t["muted"]]
+    total = sum(v for _, v in PHASES)
+
+    fig = plt.figure(figsize=(10.5, 3.55), dpi=200)
+    ax = fig.add_axes((0.035, 0.575, 0.930, 0.140))
+    ax.set_xlim(0, total)
+    ax.set_ylim(-0.5, 0.5)
+    ax.axis("off")
+
+    x = 0.0
+    for (label, us), c in zip(PHASES, colors):
+        _rounded_hbar(ax, 0, x, x + us, 0.95, c, radius_pt=3.0)
+        if us / total > 0.05:
+            ax.text(
+                x + us / 2,
+                0,
+                f"{us / 1e3:.2f} ms",
+                ha="center",
+                va="center",
+                fontsize=12,
+                fontweight="bold",
+                color="#ffffff",
+            )
+        x += us
+
+    fig.suptitle(
+        f"Model inference, {total / 1e3:.2f} ms of GPU time per predict",
+        x=0.035,
+        y=0.945,
+        ha="left",
+        fontsize=14,
+        fontweight="bold",
+        color=t["ink"],
+    )
+    fig.text(
+        0.035,
+        0.840,
+        "preprocessing and the output transform are outside "
+        "this; the prefix runs once, the denoise loop ten times.",
+        ha="left",
+        fontsize=9,
+        color=t["ink2"],
+    )
+
+    x = 0.0
+    for (label, us), c in zip(PHASES, colors):
+        if us / total > 0.02:
+            fx = 0.035 + 0.930 * (x + us / 2) / total
+            ax.figure.text(
+                fx, 0.500, label, ha="center", va="top", fontsize=9, color=t["ink"]
+            )
+            ax.figure.text(
+                fx,
+                0.410,
+                f"{100 * us / total:.1f}%",
+                ha="center",
+                va="top",
+                fontsize=9,
+                color=t["muted"],
+            )
+            bound = ROOFLINE.get(label)
+            if bound is not None:
+                ax.figure.text(
+                    fx,
+                    0.285,
+                    bound[0],
+                    ha="center",
+                    va="top",
+                    fontsize=8.5,
+                    fontweight="bold",
+                    color=c,
+                )
+                for k, line in enumerate(bound[1:]):
+                    ax.figure.text(
+                        fx,
+                        0.195 - k * 0.080,
+                        line,
+                        ha="center",
+                        va="top",
+                        fontsize=8.5,
+                        color=t["ink2"],
+                    )
+        x += us
+    fig.savefig(OUT / f"phases_{mode}.png")
     plt.close(fig)
 
 
@@ -504,15 +632,15 @@ def _shrink(colors: int = 64) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--sqlite", default=None)
-    ap.add_argument("--sqlite-off", default=None)
     args = ap.parse_args()
     if args.sqlite:
         derive_denoise(args.sqlite)
     for mode in ("light", "dark"):
         chart_ledger(mode)
         chart_denoise(mode)
+        chart_phases(mode)
     _shrink()
-    print(f"wrote 4 PNGs to {OUT}")
+    print(f"wrote 6 PNGs to {OUT}")
 
 
 if __name__ == "__main__":
