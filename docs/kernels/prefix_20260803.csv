@@ -1,0 +1,29 @@
+build,phase,kernel,role,origin,launches_per_predict,us_per_predict,pct_phase,gflop_per_predict,achieved_tflop_s,pct_peak_bf16
+main,prefix/vision_siglip,cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x64_64x4_tn_align8,q/k/v/out projections,cuBLAS,108,1864.20,31.42,220.151,118.1,57.3
+main,prefix/vision_siglip,cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x64_32x6_tn_align8,MLP fc2 GEMM,cuBLAS,27,1563.68,26.35,205.627,131.5,63.8
+main,prefix/vision_siglip,cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x5_tn_align8,MLP fc1 GEMM,cuBLAS,27,1333.35,22.47,205.627,154.2,74.8
+main,prefix/vision_siglip,pytorch_flash::flash_fwd_kernel,"attention S=256 x 3 views, head_dim 72",flash-attn,27,381.39,6.43,24.461,64.1,31.1
+main,prefix/vision_siglip,cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_tn_align8,projector 1152 -> 2048,cuBLAS,1,25.02,0.42,3.624,144.8,70.2
+main,prefix/vision_siglip,sm80_xmma_fprop_implicit_gemm_indexed_wo_smem_tf32f32_tf32f32_f32_nhwckrsc_nhwc_tilesize128x32x16_stage1_warpsize4x1x1_g1_tensor16x8x8_aligna4_alignc8_execute_kernel__5x_cudnn,patch-embedding conv (tf32),cuDNN,1,56.56,0.95,1.040,18.4,n/a (tf32)
+main,prefix/vision_siglip,[residue] LayerNorm,55 launches over 5 fusion sites,inductor,55,308.14,5.19,0,,
+main,prefix/vision_siglip,[residue] GELU activation,"elementwise gelu over [768,4304]",inductor,27,194.30,3.27,0,,
+main,prefix/vision_siglip,[residue] attention layout copies,q/k/v pack for flash + output unpack,inductor,108,190.50,3.21,0,,
+main,prefix/vision_siglip,[residue] conv glue + 3-view concat,"fp32<->bf16 convert, im2col, CatArrayBatchedCopy",cuDNN/aten,4,16.53,0.28,0,,
+main,prefix/vision_siglip,GEMM SUBTOTAL,named GEMM/attention rows above,,191,5224.20,88.04,660.530,126.4,61.3
+main,prefix/vision_siglip,RESIDUE (derived by subtraction),phase total minus the named GEMM rows,,194,709.50,11.96,0,,
+main,prefix/vision_siglip,PHASE TOTAL,,,385,5933.7,100.00,660.530,111.3,54.0
+main,prefix/vlm_forward,cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_tn_align8,MLP gate + up GEMM,cuBLAS,34,12749.92,52.16,2208.687,173.2,84.0
+main,prefix/vlm_forward,cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8,MLP down GEMM (split-K 3),cuBLAS,17,6676.86,27.32,1104.343,165.4,80.2
+main,prefix/vlm_forward,triton_tem_fused_clone_mm_11,o_proj GEMM (+ transpose prologue),inductor,17,1129.48,4.62,138.043,122.2,59.3
+main,prefix/vlm_forward,triton_tem_fused_mm_1,"fused q|k|v GEMM, N=2560",inductor,17,1122.72,4.59,172.554,153.7,74.5
+main,prefix/vlm_forward,triton_tem_fused_bmm_10,attention P*V,inductor,17,635.17,2.60,65.247,102.7,49.8
+main,prefix/vlm_forward,triton_tem_fused_bmm_7,attention Q*K^T,inductor,17,549.97,2.25,65.247,118.6,57.5
+main,prefix/vlm_forward,triton_tem_fused_mm_19,layer-18 k_proj/v_proj (kv-only layer),inductor,2,45.91,0.19,2.030,44.2,21.4
+main,prefix/vlm_forward,[residue] GeGLU activation,"elementwise gelu(gate)*up over [968,16384]",inductor,17,663.25,2.71,0,,
+main,prefix/vlm_forward,[residue] RMSNorm,35 launches over 7 fusion sites,inductor,35,390.67,1.60,0,,
+main,prefix/vlm_forward,[residue] masked softmax,"attention softmax over [8,968,968]",inductor,17,230.68,0.94,0,,
+main,prefix/vlm_forward,[residue] RoPE apply,rotary applied to q and k,inductor,35,226.10,0.93,0,,
+main,prefix/vlm_forward,[residue] reshape / copy / setup,attention reshape + once-per-predict rotary table,inductor,20,22.49,0.09,0,,
+main,prefix/vlm_forward,GEMM SUBTOTAL,named GEMM/attention rows above,,121,22910.03,93.73,3756.151,164.0,79.5
+main,prefix/vlm_forward,RESIDUE (derived by subtraction),phase total minus the named GEMM rows,,124,1533.17,6.27,0,,
+main,prefix/vlm_forward,PHASE TOTAL,,,245,24443.2,100.00,3756.151,153.7,74.5
