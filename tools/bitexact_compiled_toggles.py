@@ -125,7 +125,7 @@ def apply_toggle(model, which: str) -> dict:
         # fallback is not the original 37 per-norm dense(cond) projections, it is the
         # Stage-A stacked GEMM (`adarms_Wstacked`, built unconditionally by
         # enable_torch_compile). Stage A was itself measured at 2.71e-3 against per-dense
-        # (RESULTS_adarms_cache.md), so leaving it in would compare the table against
+        # (measured), so leaving it in would compare the table against
         # another optimization instead of against the baseline the ledger claims.
         # Killing build_adarms_stack too drops all the way through to `self.dense(cond)`,
         # which IS the pre-optimization path and IS what the eager test compared against.

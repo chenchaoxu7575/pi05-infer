@@ -26,7 +26,7 @@ comparable:
   * ``vision``   -- the SigLIP tower only, back to back (``embed_image``)
 
 Usage:
-    /opt/venv/openpi/bin/python tools/prefix_sol_probe.py \
+    python tools/prefix_sol_probe.py \
         --model-path .../RLinf-Pi05-LIBERO-SFT --config-name pi05_turtle \
         --stage1 --seconds 20 --json out.json
 """

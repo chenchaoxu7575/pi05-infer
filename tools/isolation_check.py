@@ -8,7 +8,7 @@ walks the two towers and asserts where every module class was defined:
 
 Fails loudly if either side leaks into the other. Run with no arguments:
 
-    /opt/venv/openpi/bin/python tools/isolation_check.py
+    python tools/isolation_check.py
 """
 
 import argparse

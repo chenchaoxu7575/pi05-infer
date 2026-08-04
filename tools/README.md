@@ -1,6 +1,6 @@
 # `tools/`
 
-31 scripts in four groups. Only the first group is meant to be run by a reader; the
+32 scripts in four groups. Only the first group is meant to be run by a reader; the
 other three are the machinery behind the numbers, kept so the numbers can be re-derived.
 
 Set the checkpoint once instead of passing it every time:
@@ -28,7 +28,7 @@ anywhere the package is installed. They are the ones the root README points at.
 | `bitexact_prefix_qkv.py` | the fused prefix QKV |
 | `bitexact_rope_hoist.py` | the hoisted denoise step invariants (`RLINF_HOIST_STEP_INVARIANTS`) |
 | `bitexact_gate.sh` | end-to-end numerical A/B, four processes, always with an empty control |
-| `run_bitexact_backfill.sh` | driver for the compiled-path gates in group 2 (`siglip\|extraction\|prefix\|adarms\|qkv\|kvstatic\|attmask`) |
+| `run_bitexact_backfill.sh` | driver for the compiled-path gates in group 2 (`siglip\|extraction\|prefix\|adarms\|adarms_eager\|qkv\|kvstatic\|attmask`) |
 
 The two digests must match. A gate declares INCONCLUSIVE, never PASS, when its own null
 control fails.
@@ -69,6 +69,7 @@ you are debugging a stage. The last two exist for when a gate comes back disagre
 | `prefix_sol_probe.py` | clock-resolved timing of the prefix phase, isolated and in situ |
 | `ab_rlinf_reference.py` | the RLinf reference arm of the A/B. Needs `--rlinf-root` (or `$RLINF_ROOT`) and an importable RLinf install; not part of the package |
 | `sglang_pi05_bench.py` | in-process bs=1 latency of SGLang's pi0.5 pipeline, for comparison against `bench/standalone_infer_bench.py` |
+| `readme_parity.py` | `README.md` vs `README.zh-CN.md`: heading levels, comment-stripped code blocks, links, images, item counts. No arguments, exits 1 on mismatch |
 
 The first five read an nsys `.sqlite` you pass in: portable, but they assume this model's
 stream layout (7 = prefix, 157 = denoise, 158 = vision) and an nsys **2026.1.2** export.

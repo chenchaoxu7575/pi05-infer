@@ -21,7 +21,7 @@ Same dummy observations, same seed, same timing harness as
 This script only READS the RLinf checkout; it never writes to it.
 
 Usage:
-    /opt/venv/openpi/bin/python tools/ab_rlinf_reference.py \
+    python tools/ab_rlinf_reference.py \
         --rlinf-root /path/to/RLinf \
         --dump-actions /tmp/ref_rlinf.pt
 """

@@ -16,7 +16,7 @@
 # So this driver runs FOUR processes: each arm twice. The cross-arm comparison is only
 # reported once both same-arm controls are clean; otherwise the verdict is INCONCLUSIVE,
 # never PASS. All four share one TORCHINDUCTOR_CACHE_DIR so that the shapes neither arm
-# touches keep the same autotune winner (see RESULTS_small_m_mm_tiles.md section 5.2).
+# touches keep the same autotune winner. Separate caches once sign-flipped a result.
 set -u
 D=${1:?usage: bitexact_gate.sh OUTDIR [bench args...]}
 shift
@@ -83,7 +83,7 @@ if meta:
 if not (ctrl_off and ctrl_on):
     print("\nVERDICT: INCONCLUSIVE -- the same-arm control is not bit-exact, so the "
           "cross-arm comparison carries no information. Pin the autotune winners "
-          "(see RESULTS_dump_actions_determinism.md) or gate at the kernel level "
+          "or gate at the kernel level "
           "with tools/bitexact_denoise_gemms.py / tools/bitgate.py.")
     sys.exit(2)
 print(f"\nVERDICT: {'PASS' if cross else 'FAIL -- the arms really do differ'}")

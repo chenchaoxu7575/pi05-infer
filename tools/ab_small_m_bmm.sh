@@ -18,7 +18,7 @@
 # produced a wrong answer on this workload before:
 #
 #  * ALTERNATING ARM ORDER. Even with the clock pinned, the arm that runs first
-#    in a round is systematically faster here (RESULTS_small_m_mm_tiles.md 5.4).
+#    in a round is systematically faster here (measured; internal record).
 #    Comparing same-position pairs is the only way to remove it.
 #  * ONE SHARED TORCHINDUCTOR_CACHE_DIR. With a cache dir per arm, autotune
 #    re-decides the shapes neither arm touches and the A/B measures those
